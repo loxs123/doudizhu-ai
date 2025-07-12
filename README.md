@@ -4,17 +4,17 @@
 
 ### 牌型表示(v1)
 
-![image-20250713020528965](C:\Users\asndj\AppData\Roaming\Typora\typora-user-images\image-20250713020528965.png)
+![image-20250713020528965](images/image-v1.png)
 
 ### 出牌身份表示(v2)
 
-![image-20250713020604702](C:\Users\asndj\AppData\Roaming\Typora\typora-user-images\image-20250713020604702.png)
+![image-20250713020604702](images/image-v2.png)
 
 ### 斗地主出牌模型
 
 
 
-![image-20250713021030769](C:\Users\asndj\AppData\Roaming\Typora\typora-user-images\image-20250713021030769.png)
+![image-20250713021030769](images/image-m2.png)
 
 ## 测试结果
 
