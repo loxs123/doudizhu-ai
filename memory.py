@@ -25,9 +25,9 @@ class Memory:
         for traj in trajs:
             # 1. memory
             for i in range(3):
-                self.memory[self.idx, i, 0] = card2vec(traj['init_cards'][i], i)
+                self.memory[self.idx, i, 0, :] = card2vec(traj['init_cards'][i], i)
             for i in range(3):
-                self.memory[self.idx, i, 1] = card2vec(traj['end_cards'], 3)
+                self.memory[self.idx, i, 1, :] = card2vec(traj['end_cards'], 3)
 
             for t, action in enumerate(traj['actions']):
                 cur_act = card2vec(action, t % 3)
@@ -36,9 +36,9 @@ class Memory:
             
             # 2. rewards
             if traj['winner'] == 0:
-                rewards = [1, -0.5, -0.5]
+                rewards = [1, -1, -1]
             else:
-                rewards = [-1, 0.5, 0.5]
+                rewards = [-1, 1, 1]
             self.rewards[self.idx, :] = rewards
 
             # 3. lengths
@@ -56,19 +56,20 @@ class Memory:
         lengths_batch = self.lengths[indices]
         max_length = np.max(lengths_batch)  # 每个玩家的最大长度
         memory_batch = memory_batch[:, :, :max_length, :]  # 截断到最大长度
-        labels = np.zeros((batch_size, 3, max_length, EMBED_SIZE), dtype=np.float32)  # 初始化标签
+        action_mask = np.zeros((batch_size, 3, max_length, 1), dtype=np.float32)  # 初始化标签
 
         for i in range(3):
-            labels[:, i, 1 + i:-1:3, :] = memory_batch[:, i, 2 + i::3, :]
+            action_mask[:, i, 2+i::3, :] = 1
         
-        advantages = rewards_batch.reshape(batch_size, 3, 1, 1) * labels
+        rewards = rewards_batch.reshape(batch_size, 3, 1, 1) * action_mask
 
         memory_batch = memory_batch.reshape(batch_size * 3, max_length, EMBED_SIZE)
-        advantages = advantages.reshape(batch_size * 3, max_length, EMBED_SIZE)
-        advantages = advantages[:,:,:-4]
+        rewards = rewards.reshape(batch_size * 3, max_length, 1)
+        action_mask = action_mask.reshape(batch_size * 3, max_length, 1)
 
         return {
             'trajs': memory_batch,
-            'advantages': advantages,
+            'rewards': rewards,
+            'action_mask': action_mask
         }
     

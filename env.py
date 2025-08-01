@@ -14,7 +14,7 @@ class Env:
         self.pre_cards = [{'type': Card.Kong, 'value': None}] * 2 # 上一手牌类型
         self.cur_player_index = 0  # 当前玩家索引
 
-    def reset(self):
+    def reset(self, log = False):
         random.shuffle(self.cards)
         player1 = self.cards[0:51:3]
         player2 = self.cards[1:51:3]
@@ -29,12 +29,12 @@ class Env:
         self.pre_cards = [{'type': Card.Kong, 'value': None}] * 2 # 上一手牌类型
         self.traj = [[], []]  # 记录出牌轨迹
         self.cur_player_index = 0  # 当前玩家索引
-        logging.info("Environment reset. Players' hands initialized.")
         
         for i, player in enumerate(self.players):
             player.sort(reverse=True)  # 确保手牌有序
             readable_cards = [card_to_str(card) for card in player]
-            logging.info(f"Player[{i}] : {' '.join(readable_cards)}")
+            if log:
+                logging.info(f"Player[{i}] : {' '.join(readable_cards)}")
 
         return self.players, end_cards
 
@@ -56,8 +56,8 @@ class Env:
         # 生成轨迹
         assert len(agents) == 3, "There must be exactly 3 agents."
         trajectories = []
-        for _ in range(roll_nums):
-            self.reset()
+        while len(trajectories) < roll_nums:
+            self.reset(log = len(trajectories) < 5)
             init_cards = copy.deepcopy(self.players)
             done = False
             for step in range(max_steps):
@@ -69,13 +69,15 @@ class Env:
                 player_cards.sort(reverse=True)  # 确保手牌有序
                 readable_left_cards = [card_to_str(card) for card in player_cards]
                 readable_cards = ['Skip'] if not readable_cards else readable_cards
-            
+
                 readable_cards_str = ' '.join(f"{card}" for card in readable_cards)
                 readable_left_cards_str = ' '.join(readable_left_cards)  # 如果不需要对齐则保留原样
-                logging.info(f"Player[{current_player}] : {' '.join(readable_cards):<15} cards: {readable_left_cards_str}")
+                if len(trajectories) < 5:
+                    logging.info(f"Player[{current_player}] : {' '.join(readable_cards):<15} cards: {readable_left_cards_str}")
                 done = self.step(cards)
                 if done:
-                    logging.info(f"Player[{current_player}] : wins!")
+                    if len(trajectories) < 5:
+                        logging.info(f"Player[{current_player}] : wins!")
                     break
             if done:
                 trajectories.append({
