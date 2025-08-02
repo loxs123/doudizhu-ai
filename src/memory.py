@@ -20,7 +20,7 @@ class Memory:
         self.size = 0
         self.max_size = max_size
         self.max_traj_len = max_traj_len
-    
+
     def add(self, trajs):
         for traj in trajs:
             # 1. memory

@@ -284,14 +284,16 @@ class Agent:
             value_target = self.policy.value_layer(value_input).unsqueeze(1)
             value_loss = F.mse_loss(value_target, rewards, reduction='none')
             value_loss = (value_loss * action_mask).sum() / (action_mask.sum() + 1e-6)  # 平均值损失，避免除以0
-
+            
             loss = per_card_loss.mean() + value_loss
-
             loss.backward()
             self.optimizer.step()
 
         self.old_policy.load_state_dict(self.policy.state_dict())  # 更新旧策略
         self.temperature *= 0.99  # 衰减探索率
+        
+    def save_model(self, save_path):
+        torch.save(self.policy.state_dict(), save_path)
 
 class RandomAgent:
     def __init__(self, playid=0):
