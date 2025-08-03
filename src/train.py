@@ -14,22 +14,21 @@ logging.basicConfig(
 
 if __name__ == "__main__":
     dz_env = Env()
-    roll_nums =2048
+    roll_nums = 2048
     mem = Memory(max_size=2048, max_traj_len=100)
-    agents = [Agent(temperature=1.5, use_opt=True, playid=0)]
-    # agents += [Agent(temperature=1, playid=i+1) for i in range(2)]
-    agents += [RandomAgent(playid=i+1) for i in range(2)] #  policy=agents[0].policy
+    agents = [Agent(temperature=1.0, use_opt=True, playid=0)]
+    # agents += [Agent(temperature=1.0,policy=agents[0].policy, playid=i+1) for i in range(2)]
+    agents += [RandomAgent(playid=i+1) for i in range(2)] #  
     # agents = [RandomAgent(playid=i) for i in range(3)]
     max_win_rate = 0
     for epoch in range(100):
         logging.info('#' * 10 + f'  epoch: {epoch}  ' + '#' * 10)
-        trajectories = dz_env.play(agents, max_steps=90, roll_nums=roll_nums)
+        trajectories = dz_env.play(agents, max_steps=90, roll_nums=roll_nums, train=True)
         mem.add(trajectories)
-        agents[0].update(mem, batch_size = 512, steps = 4)
+        agents[0].update(mem, batch_size = 512, steps = 4, agent_id = 0)
         win = 0
         for traj in trajectories:
             if traj['winner'] == 0:
                 win += 1
         logging.info(f'Agent SUCCESS Rate {win / roll_nums}')
-        if win / roll_nums > max_win_rate:
-            agents[0].save_model('agent.pth')
+        agents[0].save_model('agent.pth')

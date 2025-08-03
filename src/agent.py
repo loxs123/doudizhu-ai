@@ -236,10 +236,10 @@ class Agent:
         with torch.no_grad():
             scores, cache = self.policy(inputs, past_key_values = self.past_key_values, use_cache=True)
             self.past_key_values = cache
-            scores = scores[:, -1]  # [action_num]
+            scores = scores[:, -1, 0]  # [action_num]
 
         if train:
-            scores = torch.softmax(scores/self.temperature)
+            probs = torch.softmax(scores/self.temperature, dim=0)
             chooseid = int(torch.multinomial(probs, num_samples=1).item())
         else:
             chooseid = int(torch.argmax(scores).item())
@@ -257,13 +257,14 @@ class Agent:
         steps = kwargs.get('steps', 1)
         epsilon_low = kwargs.get('epsilon_low', 0.1)
         epsilon_high = kwargs.get('epsilon_high', 0.2)
+        agent_id = kwargs.get('agent_id', None)
 
         for _ in range(steps):
-            data = memory.sample(batch_size=batch_size)
+            data = memory.sample(batch_size=batch_size, agent_id = agent_id)
             trajs = torch.tensor(data['trajs'], dtype = torch.float32).to(DEVICE)  # [batch_size * 3, max_length, EMBED_SIZE]
             rewards = torch.tensor(data['rewards'], dtype = torch.float32).to(DEVICE)
             action_mask = torch.tensor(data['action_mask'], dtype = torch.float32).to(DEVICE)
-            value_input = trajs[:, :2].reshape(batch_size * 3, -1)
+            value_input = trajs[:, :2].reshape(trajs.shape[0], -1)
             advantages = rewards - self.policy.value_layer(value_input).unsqueeze(1).detach()  # [batch_size * 3, max_length, 1]
             advantages = advantages * action_mask
             self.policy.zero_grad()
@@ -298,6 +299,6 @@ class Agent:
 class RandomAgent:
     def __init__(self, playid=0):
         self.playid = playid
-    def action(self, hand_cards, history, init_cards, end_cards, new_game = False):
+    def action(self, hand_cards, history, init_cards, end_cards, new_game = False, **kwargs):
         legal_actions = find_legal_cards(hand_cards, history)
         return random.choice(legal_actions)

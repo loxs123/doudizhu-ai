@@ -52,7 +52,7 @@ class Env:
             self.cur_player_index = (self.cur_player_index + 1) % len(self.players)
             return False
         
-    def play(self, agents, max_steps=98, roll_nums = 100):
+    def play(self, agents, max_steps=98, roll_nums = 100, train=True):
         # 生成轨迹
         assert len(agents) == 3, "There must be exactly 3 agents."
         trajectories = []
@@ -64,7 +64,7 @@ class Env:
                 current_player = self.cur_player_index
                 player_cards = self.players[current_player]
                 cards = agents[current_player].action(player_cards, self.traj, init_cards[current_player],
-                                                      self.end_cards, new_game = step//3==0) 
+                                                      self.end_cards, new_game = step//3==0, train=train)
                 readable_cards = [card_to_str(card) for card in cards]
                 player_cards.sort(reverse=True)  # 确保手牌有序
                 readable_left_cards = [card_to_str(card) for card in player_cards]

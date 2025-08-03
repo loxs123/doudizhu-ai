@@ -49,7 +49,7 @@ class Memory:
             self.size += 1
             self.size = min(self.size, self.max_size)  # 确保不超过最大大小
 
-    def sample(self, batch_size=32):
+    def sample(self, batch_size=32, agent_id = None):
         indices = np.random.choice(self.size, batch_size, replace=False)
         memory_batch = self.memory[indices] # [batch_size, 3, max_traj_len, 54 + 4]
         rewards_batch = self.rewards[indices] # [batch_size, 3, ]
@@ -60,12 +60,16 @@ class Memory:
 
         for i in range(3):
             action_mask[:, i, 2+i::3, :] = 1
-        
         rewards = rewards_batch.reshape(batch_size, 3, 1, 1) * action_mask
-
-        memory_batch = memory_batch.reshape(batch_size * 3, max_length, EMBED_SIZE)
-        rewards = rewards.reshape(batch_size * 3, max_length, 1)
-        action_mask = action_mask.reshape(batch_size * 3, max_length, 1)
+        
+        if agent_id is None:
+            memory_batch = memory_batch.reshape(batch_size * 3, max_length, EMBED_SIZE)
+            rewards = rewards.reshape(batch_size * 3, max_length, 1)
+            action_mask = action_mask.reshape(batch_size * 3, max_length, 1)
+        else:
+            memory_batch = memory_batch[:, agent_id]
+            rewards = rewards[:, agent_id]
+            action_mask = action_mask[:, agent_id]
 
         return {
             'trajs': memory_batch,
