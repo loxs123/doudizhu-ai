@@ -54,18 +54,21 @@ class Memory:
         memory_batch = self.memory[indices] # [batch_size, 3, max_traj_len, 54 + 4]
         rewards_batch = self.rewards[indices] # [batch_size, 3, ]
         lengths_batch = self.lengths[indices]
-        max_length = np.max(lengths_batch)  # 每个玩家的最大长度
+        max_length = np.max(lengths_batch) + 2  # 每个玩家的最大长度
         memory_batch = memory_batch[:, :, :max_length, :]  # 截断到最大长度
-        action_mask = np.zeros((batch_size, 3, max_length, 1), dtype=np.float32)  # 初始化标签
+        action_mask = np.zeros((batch_size, 3, max_length), dtype=np.float32)  # 初始化标签
 
         for i in range(3):
-            action_mask[:, i, 2+i::3, :] = 1
-        rewards = rewards_batch.reshape(batch_size, 3, 1, 1) * action_mask
-        
+            action_mask[:, i, 2+i::3] = 1
+        rewards = np.zeros((batch_size, 3, max_length))
+        for i, length in enumerate(lengths_batch):
+            for j in range(max(length-3, 0), length):
+                rewards[i, j % 3, 2 + j] = rewards_batch[i, j % 3]
+
         if agent_id is None:
             memory_batch = memory_batch.reshape(batch_size * 3, max_length, EMBED_SIZE)
-            rewards = rewards.reshape(batch_size * 3, max_length, 1)
-            action_mask = action_mask.reshape(batch_size * 3, max_length, 1)
+            rewards = rewards.reshape(batch_size * 3, max_length)
+            action_mask = action_mask.reshape(batch_size * 3, max_length)
         else:
             memory_batch = memory_batch[:, agent_id]
             rewards = rewards[:, agent_id]
@@ -76,4 +79,3 @@ class Memory:
             'rewards': rewards,
             'action_mask': action_mask
         }
-    

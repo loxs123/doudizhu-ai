@@ -15,11 +15,10 @@ logging.basicConfig(
 if __name__ == "__main__":
     dz_env = Env()
     roll_nums = 2048
-    mem = Memory(max_size=2048, max_traj_len=100)
-    agents = [Agent(temperature=1.0, use_opt=True, playid=0)]
+    mem = Memory(max_size=2048 * 1, max_traj_len=100)
+    agents = [Agent(use_opt=True, playid=0)]
     # agents += [Agent(temperature=1.0,policy=agents[0].policy, playid=i+1) for i in range(2)]
     agents += [RandomAgent(playid=i+1) for i in range(2)] #  
-    # agents = [RandomAgent(playid=i) for i in range(3)]
     max_win_rate = 0
     for epoch in range(100):
         logging.info('#' * 10 + f'  epoch: {epoch}  ' + '#' * 10)

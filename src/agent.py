@@ -10,8 +10,54 @@ from utils import find_all_legal_cards, cal_cards_type, find_legal_cards, card2v
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def scaled_masked_mean(data, mask, dim = 1):
-    return (data * mask).sum(dim = dim) / torch.sqrt(mask.sum(dim = dim) + 1e-4)
+def compute_gae(rewards, values, gamma=0.99, lam=0.95):
+    """
+    GAE计算:
+    rewards: [B, T]
+    values: [B, T]
+    mask: [B, T]
+    """
+    T = rewards.shape[1]
+    advantages = torch.zeros_like(rewards)
+    last_gae = 0
+
+    flag = True
+    for t in reversed(range(2, T, 3)):
+        if flag:
+            next_values = torch.zeros_like(values[:, t])
+        else:
+            next_values = values[:, t + 3]
+        
+        delta = rewards[:, t] + gamma * next_values - values[:, t]
+        advantages[:, t] = last_gae = delta + gamma * lam * last_gae
+        flag = False
+
+    last_gae = 0
+    flag = True
+    for t in reversed(range(3, T, 3)):
+        if flag:
+            next_values = torch.zeros_like(values[:, t])
+        else:
+            next_values = values[:, t + 3]
+        
+        delta = rewards[:, t] + gamma * next_values - values[:, t]
+        advantages[:, t] = last_gae = delta + gamma * lam * last_gae
+        flag = False
+
+    last_gae = 0
+    flag = True
+    for t in reversed(range(4, T, 3)):
+        if flag:
+            next_values = torch.zeros_like(values[:, t])
+        else:
+            next_values = values[:, t + 3]
+        
+        delta = rewards[:, t] + gamma * next_values - values[:, t]
+        advantages[:, t] = last_gae = delta + gamma * lam * last_gae
+        flag = False
+
+    returns = advantages + values
+    return advantages, returns
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len=100):
@@ -141,15 +187,6 @@ class PolicyModel(nn.Module):
         )
         self.decoder_layer = nn.Linear(512, 1) # 输出得分
 
-        self.value_layer = nn.Sequential(
-            nn.Linear(59 * 2, 128),  # 输入层 -> 隐藏层1
-            nn.ReLU(),
-            nn.Linear(128, 32),   # 隐藏层1 -> 隐藏层2
-            nn.ReLU(),
-            nn.Linear(32, 1),     # 隐藏层2 -> 输出层
-            nn.Tanh()  # 输出层激活函数
-        )
-
     def forward(self, x, past_key_values=None, use_cache=False):
         """
         x: (batch, seq_len, input_dim)
@@ -178,16 +215,16 @@ class PolicyModel(nn.Module):
             else:
                 x = layer(x, tgt_mask=tgt_mask, past_key_value=past_kv, use_cache=False)
 
-        logits = self.decoder_layer(x)  # (batch, seq_len, 1)
+        values = self.decoder_layer(x).squeeze(-1)  # (batch, seq_len)
 
         if use_cache:
-            return logits, new_past_key_values
+            return values, new_past_key_values
         else:
-            return logits
+            return values
 
 class Agent:
-    def __init__(self, temperature=0.1, lr=1e-4, playid=0 , use_opt=False, policy=None):
-        self.temperature = temperature
+    def __init__(self, sample_eps=0.03, lr=1e-4, playid=0 , use_opt=False, policy=None):
+        self.sample_eps = sample_eps
         self.playid = playid
         self.past_key_values = None
         self.prev_len = 0
@@ -195,12 +232,17 @@ class Agent:
             self.policy = policy
         else:
             self.policy = PolicyModel().to(DEVICE)
+            self.value_model = PolicyModel().to(DEVICE)  # 用于计算旧的值
 
         if use_opt:
+            self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
+            self.value_optimizer = torch.optim.Adam(self.value_model.parameters(), lr=lr)
             self.old_policy = PolicyModel().to(DEVICE)
             self.old_policy.load_state_dict(self.policy.state_dict())
             self.old_policy.eval()
-            self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
+            self.old_value_model = PolicyModel().to(DEVICE)
+            self.old_value_model.load_state_dict(self.policy.state_dict())
+            self.old_value_model.eval()
 
     def action(self, hand_cards, history, init_cards, end_cards, new_game = False, train=False):
         legal_actions = find_legal_cards(hand_cards, history)
@@ -236,16 +278,17 @@ class Agent:
         with torch.no_grad():
             scores, cache = self.policy(inputs, past_key_values = self.past_key_values, use_cache=True)
             self.past_key_values = cache
-            scores = scores[:, -1, 0]  # [action_num]
+            scores = scores[:, -1]  # [action_num]
 
         if train:
-            probs = torch.softmax(scores/self.temperature, dim=0)
-            chooseid = int(torch.multinomial(probs, num_samples=1).item())
+            if random.random() < self.sample_eps:
+                chooseid = random.randint(0, len(legal_actions) - 1)
+            else:
+                chooseid = int(torch.argmax(scores).item())
         else:
             chooseid = int(torch.argmax(scores).item())
-        
+
         for i in range(len(self.past_key_values)):
-            # update past_key_values to only keep the selected token
             self.past_key_values[i] = (self.past_key_values[i][0][chooseid:chooseid+1], 
                                        self.past_key_values[i][1][chooseid:chooseid+1])
 
@@ -255,25 +298,25 @@ class Agent:
         self.policy.train()
         batch_size = kwargs.get('batch_size', 32)
         steps = kwargs.get('steps', 1)
-        epsilon_low = kwargs.get('epsilon_low', 0.1)
-        epsilon_high = kwargs.get('epsilon_high', 0.2)
         agent_id = kwargs.get('agent_id', None)
+        epsilon_low = kwargs.get('epsilon_low', 0.2)
+        epsilon_high = kwargs.get('epsilon_high', 0.2)
 
         for _ in range(steps):
             data = memory.sample(batch_size=batch_size, agent_id = agent_id)
-            trajs = torch.tensor(data['trajs'], dtype = torch.float32).to(DEVICE)  # [batch_size * 3, max_length, EMBED_SIZE]
+            trajs = torch.tensor(data['trajs'], dtype = torch.float32).to(DEVICE)  # [batch_size, max_length, EMBED_SIZE]
             rewards = torch.tensor(data['rewards'], dtype = torch.float32).to(DEVICE)
             action_mask = torch.tensor(data['action_mask'], dtype = torch.float32).to(DEVICE)
-            value_input = trajs[:, :2].reshape(trajs.shape[0], -1)
-            advantages = rewards - self.policy.value_layer(value_input).unsqueeze(1).detach()  # [batch_size * 3, max_length, 1]
-            advantages = advantages * action_mask
-            self.policy.zero_grad()
-            logits = self.policy(trajs)  # [batch_size * 3, max_length, 54]
-            log_probs = torch.log(torch.sigmoid(logits))
-
+            max_length = trajs.shape[1]
+            
+            # value_preds = self.policy(trajs)  # [batch_size, max_length]
             with torch.no_grad():
-                old_logits = self.old_policy(trajs)
-                old_log_probs = torch.log(torch.sigmoid(old_logits))
+                old_value_preds = self.old_value_model(trajs)  # [batch_size, max_length]
+            advantages, returns = compute_gae(rewards, old_value_preds.detach(), gamma=0.99, lam=0.95)
+            self.policy.zero_grad()
+            log_probs = self.policy(trajs)  # [batch_size * 3, max_length, 54]
+            with torch.no_grad():
+                old_log_probs = self.old_policy(trajs)
 
             # PPO clip loss
             coef_1 = torch.exp(log_probs - old_log_probs)
@@ -281,18 +324,22 @@ class Agent:
             per_card_loss1 = coef_1 * advantages
             per_card_loss2 = coef_2 * advantages
             per_card_loss = -torch.min(per_card_loss1, per_card_loss2)
-
-            value_target = self.policy.value_layer(value_input).unsqueeze(1)
-            value_loss = F.mse_loss(value_target, rewards, reduction='none')
-            value_loss = (value_loss * action_mask).sum() / (action_mask.sum() + 1e-6)  # 平均值损失，避免除以0
-            
-            loss = per_card_loss.mean() + value_loss
-            loss.backward()
+            per_card_loss = (per_card_loss * action_mask).sum() / (action_mask.sum() + 1e-6)
+            per_card_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
             self.optimizer.step()
 
-        self.old_policy.load_state_dict(self.policy.state_dict())  # 更新旧策略
-        self.temperature *= 0.99  # 衰减探索率
-        
+            self.value_model.zero_grad()
+            value_preds = self.value_model(trajs)
+            value_loss = F.mse_loss(value_preds, returns, reduction='none')
+            value_loss = (value_loss * action_mask).sum() / (action_mask.sum() + 1e-6)
+            value_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), max_norm=1.0)
+            self.value_optimizer.step()
+
+        self.old_policy.load_state_dict(self.policy.state_dict())
+        self.old_value_model.load_state_dict(self.value_model.state_dict())
+
     def save_model(self, save_path):
         torch.save(self.policy.state_dict(), save_path)
 

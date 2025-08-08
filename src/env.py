@@ -11,6 +11,7 @@ class Env:
         self.cards = [i // 4 + 1 for i in range(52)] + [14, 15]  # 13种牌+大小王
         self.players = []
         self.end_cards = []  # 底牌
+        self.traj = [[], []]  # 记录出牌轨迹
         self.pre_cards = [{'type': Card.Kong, 'value': None}] * 2 # 上一手牌类型
         self.cur_player_index = 0  # 当前玩家索引
 
@@ -29,7 +30,7 @@ class Env:
         self.pre_cards = [{'type': Card.Kong, 'value': None}] * 2 # 上一手牌类型
         self.traj = [[], []]  # 记录出牌轨迹
         self.cur_player_index = 0  # 当前玩家索引
-        
+
         for i, player in enumerate(self.players):
             player.sort(reverse=True)  # 确保手牌有序
             readable_cards = [card_to_str(card) for card in player]
@@ -82,7 +83,7 @@ class Env:
             if done:
                 trajectories.append({
                     'init_cards': init_cards,
-                    'actions': self.traj,
+                    'actions': self.traj[2:],
                     'winner': self.cur_player_index,
                     'end_cards': self.end_cards
                 })
