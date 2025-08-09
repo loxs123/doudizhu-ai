@@ -1,4 +1,5 @@
 # 
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +10,11 @@ import math
 from utils import find_all_legal_cards, cal_cards_type, find_legal_cards, card2vec
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def explained_variance(y_true, y_pred):
+    # 1 表示完全拟合，0 表示不相关，<0 表示很糟糕
+    var_y = torch.var(y_true)
+    return 1 - torch.var(y_true - y_pred) / (var_y + 1e-8)
 
 def compute_gae(rewards, values, gamma=0.99, lam=0.95):
     """
@@ -182,7 +188,7 @@ class PolicyModel(nn.Module):
         super().__init__()
         self.input_layer = nn.Linear(59, 512)  # 输入是54张牌的one-hot编码/1(不出情况)/3+1(底牌)位置标记
         self.layers = nn.ModuleList(
-            [TransformerDecoderLayer(d_model=512, nhead=8) 
+            [TransformerDecoderLayer(d_model=512, nhead=8, dim_feedforward=2048) 
             for _ in range(3)]
         )
         self.decoder_layer = nn.Linear(512, 1) # 输出得分
@@ -300,7 +306,6 @@ class Agent:
     def update(self, memory, **kwargs):
         self.policy.train()
         batch_size = kwargs.get('batch_size', 32)
-        steps = kwargs.get('steps', 1)
         agent_id = kwargs.get('agent_id', None)
         epsilon_low = kwargs.get('epsilon_low', 0.2)
         epsilon_high = kwargs.get('epsilon_high', 0.2)
@@ -308,43 +313,80 @@ class Agent:
         gae_lambda = kwargs.get('gae_lambda', 0.95)
         steps = kwargs.get('ppo_update_step', 4)
 
-        for _ in range(steps):
-            data = memory.sample(batch_size=batch_size, agent_id = agent_id)
-            trajs = torch.tensor(data['trajs'], dtype = torch.float32).to(DEVICE)  # [batch_size, max_length, EMBED_SIZE]
-            rewards = torch.tensor(data['rewards'], dtype = torch.float32).to(DEVICE)
-            action_mask = torch.tensor(data['action_mask'], dtype = torch.float32).to(DEVICE)
+        for update_step in range(steps):
+            data = memory.sample(batch_size=batch_size, agent_id=agent_id)
+            trajs = torch.tensor(data['trajs'], dtype=torch.float32).to(DEVICE)
+            rewards = torch.tensor(data['rewards'], dtype=torch.float32).to(DEVICE)
+            action_mask = torch.tensor(data['action_mask'], dtype=torch.float32).to(DEVICE)
+
             max_length = trajs.shape[1]
-            
-            # value_preds = self.policy(trajs)  # [batch_size, max_length]
+
+            # 计算旧 value
             with torch.no_grad():
-                old_value_preds = self.old_value_model(trajs)  # [batch_size, max_length]
-            advantages, returns = compute_gae(rewards, old_value_preds.detach(), gamma=gae_gamma, lam=gae_lambda)
+                old_value_preds = self.old_value_model(trajs)
+
+            advantages, returns = compute_gae(
+                rewards, old_value_preds.detach(), gamma=gae_gamma, lam=gae_lambda
+            )
+            # 标准化 advantage
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+            # ---- Policy Update ----
             self.policy.zero_grad()
-            log_probs = self.policy(trajs)  # [batch_size * 3, max_length, 54]
+            log_probs = self.policy(trajs)  # 假设输出的是 log_prob
             with torch.no_grad():
                 old_log_probs = self.old_policy(trajs)
 
-            # PPO clip loss
-            coef_1 = torch.exp(log_probs - old_log_probs)
-            coef_2 = torch.clamp(coef_1, 1 - epsilon_low, 1 + epsilon_high)
-            per_card_loss1 = coef_1 * advantages
-            per_card_loss2 = coef_2 * advantages
-            per_card_loss = -torch.min(per_card_loss1, per_card_loss2)
-            per_card_loss = (per_card_loss * action_mask).sum() / (action_mask.sum() + 1e-6)
-            per_card_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+            # PPO ratio
+            ratio = torch.exp(log_probs - old_log_probs)
+            clipped_ratio = torch.clamp(ratio, 1 - epsilon_low, 1 + epsilon_high)
+
+            per_card_loss1 = ratio * advantages
+            per_card_loss2 = clipped_ratio * advantages
+            policy_loss = -torch.min(per_card_loss1, per_card_loss2)
+            policy_loss = (policy_loss * action_mask).sum() / (action_mask.sum() + 1e-6)
+            policy_loss.backward()
+
+            # 记录梯度范数
+            grad_norm_policy = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
             self.optimizer.step()
 
+            # ---- Value Update ----
             self.value_model.zero_grad()
             value_preds = self.value_model(trajs)
             value_loss = F.mse_loss(value_preds, returns, reduction='none')
             value_loss = (value_loss * action_mask).sum() / (action_mask.sum() + 1e-6)
             value_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), max_norm=1.0)
+            grad_norm_value = torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), max_norm=1.0)
             self.value_optimizer.step()
 
+            # ---- 监控指标 ----
+            with torch.no_grad():
+                approx_kl = (old_log_probs - log_probs).mean().item()
+                entropy = (-torch.exp(log_probs) * log_probs).sum(dim=-1).mean().item()
+                exp_var = explained_variance(returns, value_preds).item()
+                adv_mean = advantages.mean().item()
+                adv_std = advantages.std().item()
+                value_mean = value_preds.mean().item()
+                value_std = value_preds.std().item()
+
+            logging.info(
+                f"[Update {update_step+1}/{steps}] "
+                f"PolicyLoss={policy_loss.item():.4f} "
+                f"ValueLoss={value_loss.item():.4f} "
+                f"ValuePred(mean={value_mean:.4f}, std={value_std:.4f})"
+                f"KL={approx_kl:.4f} "
+                f"Entropy={entropy:.4f} "
+                f"Adv(mean={adv_mean:.4f}, std={adv_std:.4f}) "
+                f"GradNorm(P={grad_norm_policy:.2f}, V={grad_norm_value:.2f}) "
+                f"ExplainedVar={exp_var:.3f} "
+                f"RewardMean={rewards.mean().item():.4f}"
+            )
+
+        # 更新旧策略
         self.old_policy.load_state_dict(self.policy.state_dict())
         self.old_value_model.load_state_dict(self.value_model.state_dict())
+
 
     def save_model(self, save_path):
         torch.save(self.policy.state_dict(), save_path)
