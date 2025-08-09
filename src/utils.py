@@ -368,6 +368,32 @@ def find_all_legal_cards(my_cards: List[int]) -> List[List[int]]:
     results = list(set(results))
     return results
 
+def _find_pre_type(his):
+    cur = len(his) - 1
+    while cur >= max(len(his) - 2, 0) and his[cur]['type'] == Card.Kong:
+        cur -= 1
+    if cur < max(len(his) - 2, 0):
+        return {'type': Card.Kong, 'value': None}
+    else:
+        return his[cur]
+
+def can_step(cur, his):
+    
+    if cur['type'] == Card.Invalid:
+        return False
+
+    pre_type = _find_pre_type(his)
+
+    if pre_type['type'] == Card.Kong and cur['type'] == Card.Kong:
+        return False
+    if pre_type['type'] != Card.Kong and cur['type'] == Card.Kong:
+        return True
+    
+    if pre_type['type'] != Card.Kong and not is_bigger(cur, pre_type):
+        return False
+    
+    return True
+
 def card_to_str(card):
     if card <= 8:
         return str(card + 2)
@@ -389,13 +415,14 @@ def card_to_str(card):
         return f'未知({card})'
 
 def find_legal_cards(my_cards: List[int], history:List[List[int]]) -> List[List[int]]:
-    if not history[-1] and not history[-2]:
+    pad_history = [(), ()] + history
+    if not pad_history[-1] and not pad_history[-2]:
         return find_all_legal_cards(my_cards)
-    elif history[-1]:
-        prev_type = cal_cards_type(history[-1])
+    elif pad_history[-1]:
+        prev_type = cal_cards_type(pad_history[-1])
         return find_bigger_cards(prev_type, my_cards) + [tuple()]
     else:
-        prev_type = cal_cards_type(history[-2])
+        prev_type = cal_cards_type(pad_history[-2])
         return find_bigger_cards(prev_type, my_cards) + [tuple()]
 
 def card2vec(cards, pos):
@@ -411,9 +438,3 @@ def card2vec(cards, pos):
         mem[54] = 1 # 不出牌标记
     mem[55 + pos] = 1  # 标记位置
     return mem
-
-
-# if __name__ == "__main__":
-
-#     cards = find_legal_cards([1,1,1,2,2,2,3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 6, 6, 7, 7, 8, 8,9,10,11,12,13], [[1,1,2,2,2,3,3,3,4,4]])
-#     print("Legal cards:", [list(c) for c in cards])

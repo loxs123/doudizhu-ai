@@ -223,8 +223,7 @@ class PolicyModel(nn.Module):
             return values
 
 class Agent:
-    def __init__(self, sample_eps=0.03, lr=1e-4, playid=0 , use_opt=False, policy=None):
-        self.sample_eps = sample_eps
+    def __init__(self, playid=0 , use_opt=False, policy=None, **kwargs):
         self.playid = playid
         self.past_key_values = None
         self.prev_len = 0
@@ -232,9 +231,12 @@ class Agent:
             self.policy = policy
         else:
             self.policy = PolicyModel().to(DEVICE)
-            self.value_model = PolicyModel().to(DEVICE)  # 用于计算旧的值
+            self.value_model = PolicyModel().to(DEVICE)
+
+        self.sample_eps = kwargs.get('sample_eps', 0.03)
 
         if use_opt:
+            lr = kwargs.get('lr', 1e-4)
             self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
             self.value_optimizer = torch.optim.Adam(self.value_model.parameters(), lr=lr)
             self.old_policy = PolicyModel().to(DEVICE)
@@ -259,15 +261,16 @@ class Agent:
             data.append(init_vec)
             end_vec = card2vec(end_cards, 3)
             data.append(end_vec)
-            for i, act in enumerate(history[2:]):
+            for i, act in enumerate(history):
                 act_vec = card2vec(act, i % 3)
                 data.append(act_vec)
         else:
-            for i in range(self.prev_len, len(history)-2):
-                act_vec = card2vec(act, i % 3)
+            for i in range(self.prev_len, len(history)):
+                act_vec = card2vec(history[i], i % 3)
                 data.append(act_vec)
-        self.prev_len = len(history) - 2
-        
+
+        self.prev_len = len(history) + 1 # +1 add current action
+
         inputs = np.array(data, dtype=np.float32)
         inputs = torch.tensor(inputs, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
@@ -301,6 +304,9 @@ class Agent:
         agent_id = kwargs.get('agent_id', None)
         epsilon_low = kwargs.get('epsilon_low', 0.2)
         epsilon_high = kwargs.get('epsilon_high', 0.2)
+        gae_gamma = kwargs.get('gae_gamma', 0.99)
+        gae_lambda = kwargs.get('gae_lambda', 0.95)
+        steps = kwargs.get('ppo_update_step', 4)
 
         for _ in range(steps):
             data = memory.sample(batch_size=batch_size, agent_id = agent_id)
@@ -312,7 +318,7 @@ class Agent:
             # value_preds = self.policy(trajs)  # [batch_size, max_length]
             with torch.no_grad():
                 old_value_preds = self.old_value_model(trajs)  # [batch_size, max_length]
-            advantages, returns = compute_gae(rewards, old_value_preds.detach(), gamma=0.99, lam=0.95)
+            advantages, returns = compute_gae(rewards, old_value_preds.detach(), gamma=gae_gamma, lam=gae_lambda)
             self.policy.zero_grad()
             log_probs = self.policy(trajs)  # [batch_size * 3, max_length, 54]
             with torch.no_grad():

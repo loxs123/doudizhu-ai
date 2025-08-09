@@ -11,15 +11,15 @@ from utils import card2vec
 EMBED_SIZE = 59  # 54种牌 + 1个不出标记 + 4个位置标记
 
 class Memory:
-    def __init__(self, max_size=1000, max_traj_len=100):
-        self.max_size = max_size
-        self.memory = np.zeros((max_size, 3, max_traj_len, EMBED_SIZE), dtype=np.int32)
+    def __init__(self, **kwargs):
+        max_size = kwargs.get('buffer_size', 2048)
+        max_traj_len = kwargs.get('max_traj_len', 100)
+        self.memory = np.zeros((max_size, 3, max_traj_len+2, EMBED_SIZE), dtype=np.int32)
         self.rewards = np.zeros((max_size, 3), dtype=np.float32)
         self.lengths = np.zeros(max_size, dtype=np.int32)
         self.idx = 0
         self.size = 0
         self.max_size = max_size
-        self.max_traj_len = max_traj_len
 
     def add(self, trajs):
         for traj in trajs:
@@ -42,19 +42,19 @@ class Memory:
             self.rewards[self.idx, :] = rewards
 
             # 3. lengths
-            self.lengths[self.idx] = len(traj['actions'])  # 每个玩家的动作长度
+            self.lengths[self.idx] = len(traj['actions'])  # 每个玩家的长度
             
             # 4. update index
             self.idx = (self.idx + 1) % self.max_size
             self.size += 1
             self.size = min(self.size, self.max_size)  # 确保不超过最大大小
 
-    def sample(self, batch_size=32, agent_id = None):
+    def sample(self, batch_size=32, agent_id = None, ):
         indices = np.random.choice(self.size, batch_size, replace=False)
         memory_batch = self.memory[indices] # [batch_size, 3, max_traj_len, 54 + 4]
         rewards_batch = self.rewards[indices] # [batch_size, 3, ]
         lengths_batch = self.lengths[indices]
-        max_length = np.max(lengths_batch) + 2  # 每个玩家的最大长度
+        max_length = np.max(lengths_batch) + 2 # 每个玩家的最大长度
         memory_batch = memory_batch[:, :, :max_length, :]  # 截断到最大长度
         action_mask = np.zeros((batch_size, 3, max_length), dtype=np.float32)  # 初始化标签
 
@@ -63,12 +63,12 @@ class Memory:
         rewards = np.zeros((batch_size, 3, max_length))
         for i, length in enumerate(lengths_batch):
             for j in range(max(length-3, 0), length):
-                rewards[i, j % 3, 2 + j] = rewards_batch[i, j % 3]
+                rewards[i, j%3, 2+j] = rewards_batch[i, j%3]
 
         if agent_id is None:
-            memory_batch = memory_batch.reshape(batch_size * 3, max_length, EMBED_SIZE)
-            rewards = rewards.reshape(batch_size * 3, max_length)
-            action_mask = action_mask.reshape(batch_size * 3, max_length)
+            memory_batch = memory_batch.reshape(batch_size*3, max_length, EMBED_SIZE)
+            rewards = rewards.reshape(batch_size*3, max_length)
+            action_mask = action_mask.reshape(batch_size*3, max_length)
         else:
             memory_batch = memory_batch[:, agent_id]
             rewards = rewards[:, agent_id]
