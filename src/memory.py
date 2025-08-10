@@ -5,10 +5,12 @@ Memory module for storing and sampling trajectories in a card game environment.
 
 from collections import Counter
 import numpy as np
+import copy
 
 from utils import card2vec
 
-EMBED_SIZE = 59  # 54种牌 + 1个不出标记 + 4个位置标记
+ALL_CARDS = [i//4 + 1 if i <= 51 else i // 4 + 1 + i - 52 for i in range(54)]
+EMBED_SIZE = 59 + 21 + 54 + 54
 
 class Memory:
     def __init__(self, **kwargs):
@@ -25,14 +27,39 @@ class Memory:
         for traj in trajs:
             # 1. memory
             for i in range(3):
-                self.memory[self.idx, i, 0, :] = card2vec(traj['init_cards'][i], i)
+                self.memory[self.idx, i, 0, :59] = card2vec(traj['init_cards'][i], i)
             for i in range(3):
-                self.memory[self.idx, i, 1, :] = card2vec(traj['end_cards'], 3)
+                self.memory[self.idx, i, 1, :59] = card2vec(traj['end_cards'], 3)
+            
+            left_cards_num = [20, 17, 17]
+            left_other_cards = [copy.deepcopy(ALL_CARDS) for _ in range(3)]
+            for i in range(3):
+                for card in traj['init_cards'][i]:
+                    left_other_cards[i].remove(card)
+
+            cur_cards_cnt = [copy.deepcopy(traj['init_cards'][i]) for i in range(3)]
 
             for t, action in enumerate(traj['actions']):
                 cur_act = card2vec(action, t % 3)
+                left_cards_num[t % 3] -= len(action)
+                left_cards_num_vec = np.zeros(21)
+                left_cards_num_vec[left_cards_num[t % 3]] = 1
+
+                for card in action:
+                    for i in range(3):
+                        if i == t % 3:
+                            cur_cards_cnt[i].remove(card)
+                        else:
+                            left_other_cards[i].remove(card)
+                # 状态：当前出牌/出牌身份/目前剩余牌数量/目前剩余牌/对手剩余牌
                 for i in range(3):
-                    self.memory[self.idx, i, t + 2, :] = cur_act
+                    self.memory[self.idx, i, t + 2, :59] = cur_act
+                    self.memory[self.idx, i, t + 2, 59:80] = left_cards_num_vec
+                    if i == t % 3:
+                        self.memory[self.idx, i, t + 2, 80:134] = card2vec(cur_cards_cnt[i])
+                        self.memory[self.idx, i, t + 2, 134:188] = card2vec(left_other_cards[i])
+                    else:
+                        self.memory[self.idx, i, t + 2, 80:188] = 0
             
             # 2. rewards
             if traj['winner'] == 0:

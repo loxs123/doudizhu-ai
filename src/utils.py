@@ -425,8 +425,11 @@ def find_legal_cards(my_cards: List[int], history:List[List[int]]) -> List[List[
         prev_type = cal_cards_type(pad_history[-2])
         return find_bigger_cards(prev_type, my_cards) + [tuple()]
 
-def card2vec(cards, pos):
-    mem = np.zeros(59, dtype=np.int32)
+def card2vec(cards, pos=None):
+    if pos is None:
+        mem = np.zeros(54, dtype=np.int32)
+    else:
+        mem = np.zeros(59, dtype=np.int32)
     cards_cnt = Counter(cards)
     for card, cnt in cards_cnt.items():
         if card <= 13:
@@ -434,7 +437,10 @@ def card2vec(cards, pos):
         else:
             idx = 52 + card - 14
         mem[idx] = 1
-    if not cards:
-        mem[54] = 1 # 不出牌标记
-    mem[55 + pos] = 1  # 标记位置
+    
+    if pos is not None:
+        if not cards:
+            mem[54] = 1 # 不出牌标记
+        mem[55 + pos] = 1  # 标记位置
+        
     return mem

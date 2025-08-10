@@ -6,10 +6,13 @@ import torch.nn.functional as F
 import random
 import numpy as np
 import math
+import copy
 
 from utils import find_all_legal_cards, cal_cards_type, find_legal_cards, card2vec
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ALL_CARDS = [i//4 + 1 if i <= 51 else i // 4 + 1 + i - 52 for i in range(54)]
+EMBED_SIZE = 59 + 21 + 54 + 54
 
 def explained_variance(y_true, y_pred):
     # 1 表示完全拟合，0 表示不相关，<0 表示很糟糕
@@ -186,7 +189,7 @@ class TransformerDecoderLayer(nn.Module):
 class PolicyModel(nn.Module):
     def __init__(self, ):
         super().__init__()
-        self.input_layer = nn.Linear(59, 512)  # 输入是54张牌的one-hot编码/1(不出情况)/3+1(底牌)位置标记
+        self.input_layer = nn.Linear(EMBED_SIZE, 512)  # 输入是54张牌的one-hot编码/1(不出情况)/3+1(底牌)位置标记
         self.layers = nn.ModuleList(
             [TransformerDecoderLayer(d_model=512, nhead=8, dim_feedforward=2048) 
             for _ in range(3)]
@@ -255,24 +258,54 @@ class Agent:
     def action(self, hand_cards, history, init_cards, end_cards, new_game = False, train=False):
         legal_actions = find_legal_cards(hand_cards, history)
         
-        act_vecs = np.zeros((len(legal_actions), 59), dtype=np.float32)
+        act_vecs = np.zeros((len(legal_actions), EMBED_SIZE), dtype=np.float32)
+
+        left_cnt = [20, 17, 17]
+        other_cards = copy.deepcopy(ALL_CARDS)
+        for card in init_cards:
+            other_cards.remove(card)
+        for i, cards in enumerate(history):
+            if i % 3 == self.playid:
+                continue
+            for card in cards:
+                other_cards.remove(card)
+            left_cnt[i % 3] -= len(cards)
+
         for i, act in enumerate(legal_actions):
-            act_vecs[i, :] = card2vec(act, self.playid)
+            cur_cards = copy.deepcopy(hand_cards)
+            for card in act: cur_cards.remove(card)
+            cnt_vec = np.zeros(21)
+            cnt_vec[len(hand_cards) - len(act)] = 1
+            act_vecs[i, :59] = card2vec(act, self.playid)
+            act_vecs[i, 59:80] = cnt_vec
+            act_vecs[i, 80:134] = card2vec(cur_cards)
+            act_vecs[i, 134:188] = card2vec(other_cards)
+
         act_vecs = torch.tensor(act_vecs, dtype=torch.float32).to(DEVICE)
 
         data = []
         if new_game:
             self.past_key_values = None
-            init_vec = card2vec(init_cards, self.playid)
+            init_vec = np.zeros(EMBED_SIZE)
+            init_vec[:59] = card2vec(init_cards, self.playid)
             data.append(init_vec)
-            end_vec = card2vec(end_cards, 3)
+            end_vec = np.zeros(EMBED_SIZE)
+            end_vec[:59] = card2vec(end_cards, 3)
             data.append(end_vec)
             for i, act in enumerate(history):
-                act_vec = card2vec(act, i % 3)
+                act_vec = np.zeros(EMBED_SIZE)
+                act_vec[:59] = card2vec(act, i % 3)
+                cnt_vec = np.zeros(21)
+                cnt_vec[left_cnt[i%3]] = 1
+                act_vec[59:80] = cnt_vec
                 data.append(act_vec)
         else:
             for i in range(self.prev_len, len(history)):
-                act_vec = card2vec(history[i], i % 3)
+                act_vec = np.zeros(EMBED_SIZE)
+                act_vec[:59] = card2vec(history[i], i % 3)
+                cnt_vec = np.zeros(21)
+                cnt_vec[left_cnt[i%3]] = 1
+                act_vec[59:80] = cnt_vec
                 data.append(act_vec)
 
         self.prev_len = len(history) + 1 # +1 add current action
@@ -329,7 +362,7 @@ class Agent:
                 rewards, old_value_preds.detach(), gamma=gae_gamma, lam=gae_lambda
             )
             # 标准化 advantage
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             # ---- Policy Update ----
             self.policy.zero_grad()
