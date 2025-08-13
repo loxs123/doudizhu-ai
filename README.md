@@ -52,4 +52,6 @@ python src/train.py --max_traj_len 90
 
 ### 下一步计划
 
-借鉴大语言模型训练的思想，先让他学习baseline中的agent，然后再用强化学习激发性能。
+[1] 农民也使用douformer模型，观察对抗多个epoch的效果[running]。
+
+[2] 借鉴大语言模型训练的思想，先让他学习baseline中的agent，然后再用强化学习激发性能。
