@@ -15,7 +15,6 @@ ALL_CARDS = [i//4 + 1 if i <= 51 else i // 4 + 1 + i - 52 for i in range(54)]
 EMBED_SIZE = 59 + 21 + 54 + 54
 
 def explained_variance(y_true, y_pred):
-    # 1 表示完全拟合，0 表示不相关，<0 表示很糟糕
     var_y = torch.var(y_true)
     return 1 - torch.var(y_true - y_pred) / (var_y + 1e-8)
 
@@ -361,9 +360,7 @@ class Agent:
             advantages, returns = compute_gae(
                 rewards, old_value_preds.detach(), gamma=gae_gamma, lam=gae_lambda
             )
-            # 标准化 advantage
-            # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
+            
             # ---- Policy Update ----
             self.policy.zero_grad()
             log_probs = self.policy(trajs)  # 假设输出的是 log_prob
