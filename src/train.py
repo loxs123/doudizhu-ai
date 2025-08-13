@@ -36,15 +36,13 @@ def parse_args():
     return args
 
 def worker_play(uid, agent_cls, agent_states, args):
-    """单个子进程采样函数"""
     dz_env = Env(log=uid==0)
-    # 从传入的权重创建 Agent
     agents = []
     for i, state_dict in enumerate(agent_states):
         if agent_cls[i] == 'Agent':
-            agent = Agent(use_opt=False, playid=i, **args)  # 采样不需要梯度更新
+            agent = Agent(use_opt=False, playid=i, **args)
             agent.policy.load_state_dict(state_dict)
-        else: # random
+        else:
             agent = RandomAgent(playid=i)
         agents.append(agent)
 
@@ -70,18 +68,14 @@ if __name__ == "__main__":
     ]
     agent_cls = ['Agent', 'RandomAgent', 'RandomAgent']
 
-    max_win_rate = 0
-    min_win_rate = 0
     per_worker_roll = args['roll_num'] // args['num_workers']
 
     for epoch in range(args['epochs']):
         logging.info('#' * 10 + f'  epoch: {epoch}  ' + '#' * 10)
 
-        # 保存当前所有 Agent 的模型权重
         agent_states = [deepcopy(agent.policy.state_dict()) \
                         if hasattr(agent, 'policy') else None for agent in agents]
 
-        # 给每个进程分配 roll_num
         pool_args = []
         for i in range(args['num_workers']):
             sub_args = args.copy()
@@ -91,24 +85,20 @@ if __name__ == "__main__":
         with mp.Pool(processes=args['num_workers']) as pool:
             results = pool.starmap(worker_play, pool_args)
 
-        # 合并所有子进程的 trajectories
         trajectories = [traj for sublist in results for traj in sublist]
         mem.add(trajectories)
-        win = 0
-        for traj in trajectories:
-            if traj['winner'] == 0:
-                win += 1
-        logging.info(f'Agent SUCCESS Rate {win / args["roll_num"]}')
-        if win / args["roll_num"] > max_win_rate:
-            max_win_rate = win / args["roll_num"]
-            if hasattr(agents[0], 'save_model'):
-                agents[0].save_model('agent0.pth')
-        if win / args["roll_num"] < min_win_rate:
-            min_win_rate = win / args["roll_num"]
-            if hasattr(agents[1], 'save_model'):
-                agents[1].save_model('agent1.pth')
-            if hasattr(agents[2], 'save_model'):
-                agents[2].save_model('agent2.pth')
+        win = sum([traj['winner'] == 0 for traj in trajectories])
+        logging.info(f'DIZHU Agent SUCCESS Rate {win / args["roll_num"]}')
+
         for i in range(3):
             if hasattr(agents[i], 'update'):
                 agents[i].update(mem, agent_id=i, **args)
+
+        if (epoch+1) % 50 == 0:
+            if hasattr(agents[0], 'save_model'):
+                agents[0].save_model(f'agent0_{epoch+1}.pth')
+            if hasattr(agents[1], 'save_model'):
+                agents[1].save_model(f'agent1_{epoch+1}.pth')
+            if hasattr(agents[2], 'save_model'):
+                agents[2].save_model(f'agent2_{epoch+1}.pth')
+                
