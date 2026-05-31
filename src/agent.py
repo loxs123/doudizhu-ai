@@ -1,4 +1,4 @@
-# 
+#
 import logging
 import torch
 import torch.nn as nn
@@ -14,58 +14,64 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ALL_CARDS = [i//4 + 1 if i <= 51 else i // 4 + 1 + i - 52 for i in range(54)]
 EMBED_SIZE = 59 + 21 + 54 + 54
 
-def explained_variance(y_true, y_pred):
+def explained_variance(y_true, y_pred, mask=None):
+    """解释方差; 传入 mask 时只在有效决策位上统计。"""
+    if mask is not None:
+        m = mask.bool()
+        y_true = y_true[m]
+        y_pred = y_pred[m]
     var_y = torch.var(y_true)
     return 1 - torch.var(y_true - y_pred) / (var_y + 1e-8)
 
-def compute_gae(rewards, values, gamma=0.99, lam=0.95):
+def compute_returns(rewards, action_mask, gamma=0.99, values=None, n_step=0):
     """
-    GAE计算:
-    rewards: [B, T]
-    values: [B, T]
-    mask: [B, T]
+    回报目标 (rewards 已是逐步稠密: PBRS 塑形 + 终局)。
+    rewards / action_mask: [B, T]，每行是单个玩家的决策序列；折扣只在
+    action_mask==1 的决策位 (自己的每一手) 上推进。
+
+    n_step<=0 或 values is None -> 纯蒙特卡洛 (回报一路累加到终局)。
+    n_step>0 且给定 values (来自目标网络的逐位 Q) -> n 步自举回报 (支柱4)。
     """
-    T = rewards.shape[1]
-    advantages = torch.zeros_like(rewards)
-    last_gae = 0
+    if not n_step or values is None:
+        # ---- 蒙特卡洛 ----
+        B, T = rewards.shape
+        returns = torch.zeros_like(rewards)
+        running = torch.zeros(B, device=rewards.device, dtype=rewards.dtype)
+        for t in reversed(range(T)):
+            is_dec = action_mask[:, t].bool()
+            stepped = rewards[:, t] + gamma * running
+            running = torch.where(is_dec, stepped, running)
+            returns[:, t] = running
+        return returns
 
-    flag = True
-    for t in reversed(range(2, T, 3)):
-        if flag:
-            next_values = torch.zeros_like(values[:, t])
-        else:
-            next_values = values[:, t + 3]
-        
-        delta = rewards[:, t] + gamma * next_values - values[:, t]
-        advantages[:, t] = last_gae = delta + gamma * lam * last_gae
-        flag = False
+    # ---- n 步自举: 只在"自己的决策位"这条子序列上做 ----
+    B, T = rewards.shape
+    # 本批 agent_id 固定 => 决策位是规则的等步长列; 取出这些列
+    col_has = (action_mask.sum(dim=0) > 0)
+    own_cols = torch.nonzero(col_has, as_tuple=False).flatten().tolist()
+    returns = torch.zeros_like(rewards)
+    if len(own_cols) == 0:
+        return returns
 
-    last_gae = 0
-    flag = True
-    for t in reversed(range(3, T, 3)):
-        if flag:
-            next_values = torch.zeros_like(values[:, t])
-        else:
-            next_values = values[:, t + 3]
-        
-        delta = rewards[:, t] + gamma * next_values - values[:, t]
-        advantages[:, t] = last_gae = delta + gamma * lam * last_gae
-        flag = False
-
-    last_gae = 0
-    flag = True
-    for t in reversed(range(4, T, 3)):
-        if flag:
-            next_values = torch.zeros_like(values[:, t])
-        else:
-            next_values = values[:, t + 3]
-        
-        delta = rewards[:, t] + gamma * next_values - values[:, t]
-        advantages[:, t] = last_gae = delta + gamma * lam * last_gae
-        flag = False
-
-    returns = advantages + values
-    return advantages, returns
+    R = rewards[:, own_cols]                 # [B, m]
+    M = action_mask[:, own_cols]             # [B, m] 该行该步是否有效
+    V = values[:, own_cols] * M              # [B, m] 无效位势值清零
+    m = len(own_cols)
+    G = torch.zeros_like(R)
+    for k in range(m):
+        acc = torch.zeros(B, device=rewards.device, dtype=rewards.dtype)
+        disc = 1.0
+        j = 0
+        while j < n_step and k + j < m:
+            acc = acc + disc * R[:, k + j]
+            disc *= gamma
+            j += 1
+        if k + n_step < m:                   # 尾部用目标网络自举
+            acc = acc + disc * V[:, k + n_step]
+        G[:, k] = acc
+    for ci, c in enumerate(own_cols):
+        returns[:, c] = G[:, ci]
+    return returns
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len=100):
@@ -124,9 +130,7 @@ class TransformerDecoderLayer(nn.Module):
     def forward(self, tgt, tgt_mask=None, past_key_value=None, use_cache=False):
         """
         tgt: (batch, tgt_len, d_model)
-        memory: (batch, src_len, d_model) or None
-        tgt_mask: (tgt_len, tgt_len)
-        memory_mask: (tgt_len, src_len)
+        tgt_mask: (tgt_len, src_len)
         """
         B, T, _ = tgt.size()
         device = tgt.device
@@ -174,26 +178,17 @@ class TransformerDecoderLayer(nn.Module):
         else:
             return tgt
 
-    def apply_rope(self, x, rope_cache):
-        # x: (B, nhead, T, head_dim), rope_cache: (T, head_dim)
-        rope_cache = rope_cache.unsqueeze(0).unsqueeze(0)  # (1, 1, T, head_dim)
-        x1 = x[..., ::2]
-        x2 = x[..., 1::2]
-        sin = rope_cache[..., ::2]
-        cos = rope_cache[..., 1::2]
-        x_rope = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
-        return x_rope
 
-
-class PolicyModel(nn.Module):
-    def __init__(self, ):
+class QNetwork(nn.Module):
+    """对每个序列位置输出一个标量 Q 值 (该位置对应"已出动作"的状态-动作价值)。"""
+    def __init__(self):
         super().__init__()
         self.input_layer = nn.Linear(EMBED_SIZE, 512)  # 输入是54张牌的one-hot编码/1(不出情况)/3+1(底牌)位置标记
         self.layers = nn.ModuleList(
-            [TransformerDecoderLayer(d_model=512, nhead=8, dim_feedforward=2048) 
+            [TransformerDecoderLayer(d_model=512, nhead=8, dim_feedforward=2048)
             for _ in range(3)]
         )
-        self.decoder_layer = nn.Linear(512, 1) # 输出得分
+        self.decoder_layer = nn.Linear(512, 1) # 输出 Q 值
 
     def forward(self, x, past_key_values=None, use_cache=False):
         """
@@ -231,32 +226,31 @@ class PolicyModel(nn.Module):
             return values
 
 class Agent:
-    def __init__(self, playid=0 , use_opt=False, policy=None, **kwargs):
+    def __init__(self, playid=0, use_opt=False, q_model=None, **kwargs):
         self.playid = playid
         self.past_key_values = None
         self.prev_len = 0
-        if policy is not None:
-            self.policy = policy
+        if q_model is not None:
+            self.q_model = q_model
         else:
-            self.policy = PolicyModel().to(DEVICE)
-            self.value_model = PolicyModel().to(DEVICE)
+            self.q_model = QNetwork().to(DEVICE)
 
         self.sample_eps = kwargs.get('sample_eps', 0.03)
+        self.temperature = kwargs.get('temperature', 1.0)        # 支柱3: Boltzmann 温度
+        self.n_step = int(kwargs.get('n_step', 0))               # 支柱4: 0=MC, >0=n步自举
+        self.normalize_returns = bool(kwargs.get('normalize_returns', True))  # 支柱1
 
         if use_opt:
             lr = kwargs.get('lr', 1e-4)
-            self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
-            self.value_optimizer = torch.optim.Adam(self.value_model.parameters(), lr=lr)
-            self.old_policy = PolicyModel().to(DEVICE)
-            self.old_policy.load_state_dict(self.policy.state_dict())
-            self.old_policy.eval()
-            self.old_value_model = PolicyModel().to(DEVICE)
-            self.old_value_model.load_state_dict(self.policy.state_dict())
-            self.old_value_model.eval()
+            self.optimizer = torch.optim.Adam(self.q_model.parameters(), lr=lr)
+            # 支柱4: 目标网络 (用于 n 步自举, 周期同步)
+            self.target_model = QNetwork().to(DEVICE)
+            self.target_model.load_state_dict(self.q_model.state_dict())
+            self.target_model.eval()
 
     def action(self, hand_cards, history, init_cards, end_cards, new_game = False, train=False):
         legal_actions = find_legal_cards(hand_cards, history)
-        
+
         act_vecs = np.zeros((len(legal_actions), EMBED_SIZE), dtype=np.float32)
 
         left_cnt = [20, 17, 17]
@@ -315,35 +309,37 @@ class Agent:
         inputs = inputs.repeat_interleave(act_vecs.size(0), dim=0)  # 扩展到与 act_vecs 相同的 batch size
         inputs = torch.cat([inputs, act_vecs.unsqueeze(1)], dim=1)  # 拼接输入向量
 
-        self.policy.eval()
+        self.q_model.eval()
         with torch.no_grad():
-            scores, cache = self.policy(inputs, past_key_values = self.past_key_values, use_cache=True)
+            scores, cache = self.q_model(inputs, past_key_values = self.past_key_values, use_cache=True)
             self.past_key_values = cache
-            scores = scores[:, -1]  # [action_num]
+            scores = scores[:, -1]  # [action_num] 每个候选动作的 Q 值
 
+        # 选择: 训练时对 Q 做 Boltzmann 温度采样(混入 ε 均匀下限), 评估时纯贪婪 (支柱3)
         if train:
-            if random.random() < self.sample_eps:
-                chooseid = random.randint(0, len(legal_actions) - 1)
-            else:
-                chooseid = int(torch.argmax(scores).item())
+            tau = max(self.temperature, 1e-3)
+            probs = torch.softmax(scores / tau, dim=-1)
+            if self.sample_eps > 0:
+                probs = (1 - self.sample_eps) * probs + self.sample_eps / len(legal_actions)
+            chooseid = int(torch.multinomial(probs, 1).item())
         else:
             chooseid = int(torch.argmax(scores).item())
 
         for i in range(len(self.past_key_values)):
-            self.past_key_values[i] = (self.past_key_values[i][0][chooseid:chooseid+1], 
+            self.past_key_values[i] = (self.past_key_values[i][0][chooseid:chooseid+1],
                                        self.past_key_values[i][1][chooseid:chooseid+1])
 
         return legal_actions[chooseid]
 
     def update(self, memory, **kwargs):
-        self.policy.train()
+        self.q_model.train()
         batch_size = kwargs.get('batch_size', 32)
         agent_id = kwargs.get('agent_id', None)
-        epsilon_low = kwargs.get('epsilon_low', 0.2)
-        epsilon_high = kwargs.get('epsilon_high', 0.2)
-        gae_gamma = kwargs.get('gae_gamma', 0.99)
-        gae_lambda = kwargs.get('gae_lambda', 0.95)
+        gamma = kwargs.get('gae_gamma', 0.99)
         steps = kwargs.get('ppo_update_step', 4)
+
+        agg = {'q_loss': 0.0, 'q_mean': 0.0, 'q_std': 0.0,
+               'return_mean': 0.0, 'explained_var': 0.0, 'grad_norm': 0.0}
 
         for update_step in range(steps):
             data = memory.sample(batch_size=batch_size, agent_id=agent_id)
@@ -351,75 +347,50 @@ class Agent:
             rewards = torch.tensor(data['rewards'], dtype=torch.float32).to(DEVICE)
             action_mask = torch.tensor(data['action_mask'], dtype=torch.float32).to(DEVICE)
 
-            max_length = trajs.shape[1]
+            # ---- 回报目标 (MC 或 n 步自举, 支柱4) ----
+            target_values = None
+            if self.n_step and hasattr(self, 'target_model'):
+                with torch.no_grad():
+                    target_values = self.target_model(trajs)
+            returns = compute_returns(rewards, action_mask, gamma=gamma,
+                                      values=target_values, n_step=self.n_step)
 
-            # 计算旧 value
-            with torch.no_grad():
-                old_value_preds = self.old_value_model(trajs)
+            # ---- 回报标准化 (支柱1: 倍率奖励量级不一, 防梯度尺度失衡) ----
+            if self.normalize_returns:
+                m = action_mask.bool()
+                if m.any():
+                    r_mean = returns[m].mean()
+                    r_std = returns[m].std()
+                    returns = (returns - r_mean) / (r_std + 1e-6)
 
-            advantages, returns = compute_gae(
-                rewards, old_value_preds.detach(), gamma=gae_gamma, lam=gae_lambda
-            )
-            
-            # ---- Policy Update ----
-            self.policy.zero_grad()
-            log_probs = self.policy(trajs)  # 假设输出的是 log_prob
-            with torch.no_grad():
-                old_log_probs = self.old_policy(trajs)
-
-            # PPO ratio
-            ratio = torch.exp(log_probs - old_log_probs)
-            clipped_ratio = torch.clamp(ratio, 1 - epsilon_low, 1 + epsilon_high)
-
-            per_card_loss1 = ratio * advantages
-            per_card_loss2 = clipped_ratio * advantages
-            policy_loss = -torch.min(per_card_loss1, per_card_loss2)
-            policy_loss = (policy_loss * action_mask).sum() / (action_mask.sum() + 1e-6)
-            policy_loss.backward()
-
-            # 记录梯度范数
-            grad_norm_policy = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+            # ---- Q 回归 ----
+            self.optimizer.zero_grad()
+            q_pred = self.q_model(trajs)  # [B, T]
+            td_loss = F.mse_loss(q_pred, returns, reduction='none')
+            loss = (td_loss * action_mask).sum() / (action_mask.sum() + 1e-6)
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.q_model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
-            # ---- Value Update ----
-            self.value_model.zero_grad()
-            value_preds = self.value_model(trajs)
-            value_loss = F.mse_loss(value_preds, returns, reduction='none')
-            value_loss = (value_loss * action_mask).sum() / (action_mask.sum() + 1e-6)
-            value_loss.backward()
-            grad_norm_value = torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), max_norm=1.0)
-            self.value_optimizer.step()
-
-            # ---- 监控指标 ----
+            # ---- 监控指标 (只在有效决策位上统计) ----
             with torch.no_grad():
-                approx_kl = (old_log_probs - log_probs).mean().item()
-                entropy = (-torch.exp(log_probs) * log_probs).sum(dim=-1).mean().item()
-                exp_var = explained_variance(returns, value_preds).item()
-                adv_mean = advantages.mean().item()
-                adv_std = advantages.std().item()
-                value_mean = value_preds.mean().item()
-                value_std = value_preds.std().item()
+                m = action_mask.bool()
+                agg['q_loss'] += loss.item()
+                agg['q_mean'] += q_pred[m].mean().item()
+                agg['q_std'] += q_pred[m].std().item()
+                agg['return_mean'] += returns[m].mean().item()
+                agg['explained_var'] += explained_variance(returns, q_pred, action_mask).item()
+                agg['grad_norm'] += float(grad_norm)
 
-            logging.info(
-                f"[Update {update_step+1}/{steps}] "
-                f"PolicyLoss={policy_loss.item():.4f} "
-                f"ValueLoss={value_loss.item():.4f} "
-                f"ValuePred(mean={value_mean:.4f}, std={value_std:.4f})"
-                f"KL={approx_kl:.4f} "
-                f"Entropy={entropy:.4f} "
-                f"Adv(mean={adv_mean:.4f}, std={adv_std:.4f}) "
-                f"GradNorm(P={grad_norm_policy:.2f}, V={grad_norm_value:.2f}) "
-                f"ExplainedVar={exp_var:.3f} "
-                f"RewardMean={rewards.mean().item():.4f}"
-            )
+        # 支柱4: 同步目标网络 (每次 update 末尾, 即每个 epoch 一次)
+        if hasattr(self, 'target_model'):
+            self.target_model.load_state_dict(self.q_model.state_dict())
 
-        # 更新旧策略
-        self.old_policy.load_state_dict(self.policy.state_dict())
-        self.old_value_model.load_state_dict(self.value_model.state_dict())
-
+        # 返回本次 update 在 steps 上的平均指标 (由调用方统一打印 / 落盘)
+        return {k: v / steps for k, v in agg.items()}
 
     def save_model(self, save_path):
-        torch.save(self.policy.state_dict(), save_path)
+        torch.save(self.q_model.state_dict(), save_path)
 
 class RandomAgent:
     def __init__(self, playid=0):

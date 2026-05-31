@@ -425,6 +425,57 @@ def find_legal_cards(my_cards: List[int], history:List[List[int]]) -> List[List[
         prev_type = cal_cards_type(pad_history[-2])
         return find_bigger_cards(prev_type, my_cards) + [tuple()]
 
+# ---------------- PBRS 势函数 / 牌力与倍率 (支柱1、2) ----------------
+# 势函数权重 (可调超参)。量级控制在 |Φ| ~ 0.5 以内, 不盖过终局奖励。
+PHI_W = {
+    'progress': 0.20,   # 出牌进度: 牌越少势越高
+    'bomb':     0.15,   # 炸弹 (留存火力, 资产)
+    'rocket':   0.20,   # 火箭 (资产)
+    'high':     0.05,   # 2 / 王 控场单张
+    'frag':     0.02,   # 压不住场的碎散低单张, 扣分
+}
+
+
+def hand_potential(cards, weights=None):
+    """对一手牌估一个势 Φ(H), 用于 PBRS 塑形。空手(已出完)返回 0。
+    牌值约定: 13=2, 14=小王, 15=大王。"""
+    if not cards:
+        return 0.0
+    w = weights or PHI_W
+    cnt = Counter(cards)
+    n = len(cards)
+    bombs = sum(1 for v, c in cnt.items() if c == 4)
+    rocket = 1 if (14 in cnt and 15 in cnt) else 0
+    highs = cnt.get(13, 0) + cnt.get(14, 0) + cnt.get(15, 0)   # 2 + 小王 + 大王
+    frag = sum(1 for v, c in cnt.items() if c == 1 and v < 13)  # 低位孤张
+    return (w['progress'] * (1.0 - n / 20.0)
+            + w['bomb'] * bombs
+            + w['rocket'] * rocket
+            + w['high'] * highs
+            - w['frag'] * frag)
+
+
+def count_multiplier(actions, winner, cap=4):
+    """斗地主本局倍率: 2^(炸弹+火箭次数), 春天/反春天再 ×2。
+    cap 限制 2 的幂次, 防止极端倍率把训练带飞。actions 为按出牌顺序的牌列表。"""
+    bombs = 0
+    for a in actions:
+        t = cal_cards_type(list(a))['type']
+        if t in (Card.Bomb, Card.KingBomb):
+            bombs += 1
+    mult = float(2 ** min(bombs, cap))
+    nonempty = [(i % 3, len(a)) for i, a in enumerate(actions)]
+    if winner == 0:
+        # 春天: 地主赢, 两农民一张牌都没出过
+        if not any(p != 0 and ln > 0 for p, ln in nonempty):
+            mult *= 2
+    else:
+        # 反春天: 农民赢, 地主只出了第一手就再没出过
+        if sum(1 for p, ln in nonempty if p == 0 and ln > 0) <= 1:
+            mult *= 2
+    return mult
+
+
 def card2vec(cards, pos=None):
     if pos is None:
         mem = np.zeros(54, dtype=np.int32)
