@@ -10,6 +10,46 @@ from copy import deepcopy
 from env import Env
 from agent import Agent, RandomAgent
 from memory import Memory
+from utils import card_to_str
+
+
+def _fmt_play(cards):
+    """一手出牌的可读串; 空=过。"""
+    return "过" if not cards else " ".join(card_to_str(c) for c in sorted(cards, reverse=True))
+
+
+def _fmt_hand(cards):
+    """一副手牌的可读串; 空手返回空串。"""
+    return "" if not cards else " ".join(card_to_str(c) for c in sorted(cards, reverse=True))
+
+
+def dump_eval_losses(path, epoch, eval_win, eval_trajs, cap=10):
+    """把评估败局(地主输)重建为逐手回放(每手: 出牌 + 三家剩余牌), 写 JSON 供看板展示。"""
+    losses = [t for t in eval_trajs if t['winner'] != 0]
+    games = []
+    for tr in losses[:cap]:
+        init = tr['init_cards']
+        hands = [list(init[i]) for i in range(3)]
+        moves = []
+        for t, play in enumerate(tr['actions']):
+            p = t % 3
+            for c in play:
+                hands[p].remove(c)
+            moves.append({
+                'player': p,
+                'play': _fmt_play(play),
+                'remain': [_fmt_hand(hands[0]), _fmt_hand(hands[1]), _fmt_hand(hands[2])],
+            })
+        games.append({
+            'init': [_fmt_hand(init[i]) for i in range(3)],
+            'end': _fmt_hand(tr['end_cards']),
+            'winner': tr['winner'],
+            'n_moves': len(tr['actions']),
+            'moves': moves,
+        })
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'epoch': epoch, 'eval_win': eval_win,
+                   'n_losses_total': len(losses), 'games': games}, f, ensure_ascii=False)
 
 
 def setup_logging(log_dir):
@@ -67,8 +107,8 @@ def parse_args():
     parser.add_argument("--mode", type=str, default="selfplay",
                         choices=["selfplay", "vs_random"],
                         help="selfplay: 三个座位都用可训练模型; vs_random: 仅地主训练, 农民随机出牌")
-    parser.add_argument("--eval_num", type=int, default=256,
-                        help="自博弈模式下每次评估的对局数 (地主模型 vs 两个随机农民)")
+    parser.add_argument("--eval_num", type=int, default=4096,
+                        help="自博弈模式下每次评估的对局数 (地主模型 vs 两个随机农民; 4096 时噪声约±0.5%)")
     parser.add_argument("--eval_interval", type=int, default=5,
                         help="每隔多少 epoch 评估一次绝对棋力")
     # 日志 / 看板
@@ -92,7 +132,14 @@ def worker_play(uid, agent_cls, agent_states, args, train=True):
         agents.append(agent)
 
     trajectories = dz_env.play(agents, train=train, **args)
-    return trajectories
+    # 收集各 Agent 的探索诊断累计量
+    stats = {'ent_sum': 0.0, 'gap_sum': 0.0, 'n': 0}
+    for ag in agents:
+        if hasattr(ag, '_n'):
+            stats['ent_sum'] += ag._ent_sum
+            stats['gap_sum'] += ag._gap_sum
+            stats['n'] += ag._n
+    return trajectories, stats
 
 
 def run_rollout(pool_cls, agent_states, args, total_roll, train=True):
@@ -107,7 +154,13 @@ def run_rollout(pool_cls, agent_states, args, total_roll, train=True):
 
     with mp.Pool(processes=num_workers) as pool:
         results = pool.starmap(worker_play, pool_args)
-    return [traj for sub in results for traj in sub]
+    trajs, ent_sum, gap_sum, n = [], 0.0, 0.0, 0
+    for sub_trajs, st in results:
+        trajs.extend(sub_trajs)
+        ent_sum += st['ent_sum']; gap_sum += st['gap_sum']; n += st['n']
+    stats = {'entropy': ent_sum / n if n else 0.0,
+             'q_gap': gap_sum / n if n else 0.0, 'n': n}
+    return trajs, stats
 
 
 if __name__ == "__main__":
@@ -138,6 +191,7 @@ if __name__ == "__main__":
         agent_cls = ['Agent', 'RandomAgent', 'RandomAgent']
 
     temp_start = args['temperature']  # 支柱3: 退火起点
+    best_score = -1.0                 # 记录最佳 eval, 用于保存 best checkpoint
 
     for epoch in range(args['epochs']):
         t0 = time.time()
@@ -151,10 +205,11 @@ if __name__ == "__main__":
                         if hasattr(agent, 'q_model') else None for agent in agents]
 
         # ---- 采样 (自博弈: 所有座位用当前模型) ----
-        trajectories = run_rollout(agent_cls, agent_states, args, args['roll_num'], train=True)
+        trajectories, roll_stats = run_rollout(agent_cls, agent_states, args, args['roll_num'], train=True)
         mem.add(trajectories)
         rollout_win = sum(traj['winner'] == 0 for traj in trajectories) / len(trajectories)
         logging.info(f"  [rollout] {len(trajectories)} 局 | 地主胜率(对当前对手)={rollout_win*100:5.2f}% "
+                     f"| 策略熵={roll_stats['entropy']:.3f} Q差={roll_stats['q_gap']:.3f} "
                      f"| {time.time()-t0:4.1f}s")
 
         # ---- 更新每个可训练 agent ----
@@ -174,9 +229,22 @@ if __name__ == "__main__":
         if args['mode'] == 'selfplay' and (epoch + 1) % args['eval_interval'] == 0:
             eval_states = [agent_states[0], None, None]
             eval_cls = ['Agent', 'RandomAgent', 'RandomAgent']
-            eval_trajs = run_rollout(eval_cls, eval_states, args, args['eval_num'], train=False)
+            eval_trajs, _ = run_rollout(eval_cls, eval_states, args, args['eval_num'], train=False)
             eval_win = sum(traj['winner'] == 0 for traj in eval_trajs) / len(eval_trajs)
             logging.info(f"  [eval]    地主 vs 随机农民 胜率={eval_win*100:5.2f}%  ({len(eval_trajs)} 局)")
+            # 落盘评估败局回放(每手出牌 + 三家剩余牌), 供看板展示
+            dump_eval_losses(os.path.join(args['log_dir'], 'eval_losses.json'),
+                             epoch, eval_win, eval_trajs)
+
+        # ---- 保存最优 checkpoint: eval 创新高时(selfplay用eval, vs_random用rollout) ----
+        score = eval_win if eval_win is not None else (
+            rollout_win if args['mode'] == 'vs_random' else None)
+        if score is not None and score > best_score:
+            best_score = score
+            for i in range(3):
+                if hasattr(agents[i], 'save_model'):
+                    agents[i].save_model(f'agent{i}_best.pth')
+            logging.info(f"  [best] 新最佳胜率 {score*100:.2f}% -> 已保存 agent*_best.pth")
 
         elapsed = time.time() - t0
         logging.info(f"  [done] epoch {epoch} 用时 {elapsed:.1f}s")
@@ -189,6 +257,9 @@ if __name__ == "__main__":
             'mode': args['mode'],
             'rollout_win': round(rollout_win, 4),
             'eval_win': None if eval_win is None else round(eval_win, 4),
+            'best_eval': None if best_score < 0 else round(best_score, 4),
+            'policy_entropy': round(roll_stats['entropy'], 4),
+            'q_gap': round(roll_stats['q_gap'], 4),
             'seats': [{k: (round(v, 4) if isinstance(v, float) else v)
                        for k, v in s.items()} for s in seats],
         })

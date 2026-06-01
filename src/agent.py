@@ -237,6 +237,10 @@ class Agent:
 
         self.sample_eps = kwargs.get('sample_eps', 0.03)
         self.temperature = kwargs.get('temperature', 1.0)        # 支柱3: Boltzmann 温度
+        # 探索诊断累计量 (训练采样时统计, 用于判断策略是否塌缩)
+        self._ent_sum = 0.0   # softmax(Q/τ) 归一化熵之和
+        self._gap_sum = 0.0    # 最优-次优 Q 差之和
+        self._n = 0            # 计入统计的决策数 (K>=2)
         self.n_step = int(kwargs.get('n_step', 0))               # 支柱4: 0=MC, >0=n步自举
         self.normalize_returns = bool(kwargs.get('normalize_returns', True))  # 支柱1
 
@@ -318,9 +322,18 @@ class Agent:
         # 选择: 训练时对 Q 做 Boltzmann 温度采样(混入 ε 均匀下限), 评估时纯贪婪 (支柱3)
         if train:
             tau = max(self.temperature, 1e-3)
-            probs = torch.softmax(scores / tau, dim=-1)
+            pol = torch.softmax(scores / tau, dim=-1)   # 纯策略分布
+            K = pol.numel()
+            if K >= 2:
+                # 归一化熵 ∈ [0,1]: 1=均匀(充分探索), 0=塌缩到单一动作
+                ent = float(-(pol * pol.clamp_min(1e-12).log()).sum().item()) / math.log(K)
+                top2 = torch.topk(scores, 2).values
+                self._ent_sum += ent
+                self._gap_sum += float((top2[0] - top2[1]).item())
+                self._n += 1
+            probs = pol
             if self.sample_eps > 0:
-                probs = (1 - self.sample_eps) * probs + self.sample_eps / len(legal_actions)
+                probs = (1 - self.sample_eps) * pol + self.sample_eps / K
             chooseid = int(torch.multinomial(probs, 1).item())
         else:
             chooseid = int(torch.argmax(scores).item())
