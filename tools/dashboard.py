@@ -92,6 +92,12 @@ PAGE = r"""<!DOCTYPE html>
 
   /* 败局回放 */
   .loss-meta{font-weight:800;margin-bottom:12px;font-size:14px}
+  .lpager{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;font-weight:800}
+  .lpager button{font:inherit;font-weight:800;cursor:pointer;background:var(--lord);border:3px solid var(--line);
+    border-radius:12px;padding:6px 14px;box-shadow:2px 2px 0 #2b2b2b}
+  .lpager button:active{transform:translate(2px,2px);box-shadow:none}
+  .lpager input{font:inherit;font-weight:800;width:60px;text-align:center;border:2px solid var(--line);border-radius:8px;padding:4px 6px}
+  .lpager .lmeta{opacity:.75;font-size:13px;font-weight:700}
   .game{border:3px dashed var(--line);border-radius:16px;padding:12px 14px;margin-bottom:16px;background:#fffdf6}
   .game-head{font-weight:800;font-size:15px;margin-bottom:10px;background:var(--red);color:#fff;
     display:inline-block;padding:4px 12px;border:2px solid var(--line);border-radius:12px;box-shadow:2px 2px 0 #2b2b2b}
@@ -173,6 +179,8 @@ const SEAT_COLORS = ['#4f9cff','#ff8a5b','#4cc38a'];
 const SEAT_NAME = {0:'seat0 地主', 1:'seat1 农民', 2:'seat2 农民'};
 let DATA = [];
 let LOSSES = null;
+let lossPage = 0;     // 当前展示的败局索引(分页)
+let _lossSig = '';    // 败局数据签名, 数据没变时 poll 不重绘(避免打断翻页/输入)
 
 function fmtPct(v){ return v==null||isNaN(v) ? '—' : (v*100).toFixed(1)+'%'; }
 
@@ -280,8 +288,46 @@ function render(){
   drawChart('entropy', [{label:'策略熵', color:'#b388ff',
     points: DATA.filter(d=>d.policy_entropy!=null).map(d=>({x:d.epoch,y:d.policy_entropy}))}], {ymin:0, ymax:1});
 
-  renderLosses();
+  // 仅当败局数据变化时才重绘该区(否则 poll 会打断翻页/数字输入)
+  const sig = LOSSES ? (LOSSES.epoch + '/' + (LOSSES.games ? LOSSES.games.length : 0)) : 'none';
+  if(sig !== _lossSig){ _lossSig = sig; renderLosses(); }
   renderTable();
+}
+
+function clampLossPage(p){
+  const n = (LOSSES && LOSSES.games) ? LOSSES.games.length : 0;
+  return n===0 ? 0 : Math.max(0, Math.min(p, n-1));
+}
+window.lossGo = function(d){ lossPage = clampLossPage(lossPage + d); renderLosses(); };
+window.lossJump = function(){
+  const el = document.getElementById('lpInput');
+  const v = parseInt(el.value, 10);
+  if(!isNaN(v)) lossPage = clampLossPage(v - 1);
+  renderLosses();
+};
+
+function gameCardHTML(g, gi){
+  let html = `<div class="game">`;
+  html += `<div class="game-head">败局 #${gi+1} · 共 ${g.n_moves} 手 · 农民 P${g.winner} 先跑 🏃💨</div>`;
+  html += `<div class="hands">`;
+  html += `<div class="hand lord"><b>👑 地主P0 [${cnt(g.init[0])}]</b>${chips(g.init[0])}</div>`;
+  html += `<div class="hand farm"><b>🧑‍🌾 农民P1 [${cnt(g.init[1])}]</b>${chips(g.init[1])}</div>`;
+  html += `<div class="hand farm"><b>🧑‍🌾 农民P2 [${cnt(g.init[2])}]</b>${chips(g.init[2])}</div>`;
+  html += `<div class="hand deck"><b>🂠 底牌</b>${chips(g.end)}</div>`;
+  html += `</div><div class="moves">`;
+  const tag = ['👑P0','🧑‍🌾P1','🧑‍🌾P2'];
+  g.moves.forEach((m, i) => {
+    html += `<div class="move p${m.player}"><div class="move-top">`;
+    html += `<span class="mv-no">${i+1}</span><span class="mv-who">P${m.player}</span>`;
+    html += `<span class="mv-play">出 ${chips(m.play)}</span></div>`;
+    html += `<div class="mv-remain">`;
+    for(let s=0;s<3;s++){
+      html += `<div class="rem ${s===m.player?'active':''}"><span class="cnt">${tag[s]} ${cnt(m.remain[s])}张</span> ${chips(m.remain[s])}</div>`;
+    }
+    html += `</div></div>`;
+  });
+  html += `</div></div>`;
+  return html;
 }
 
 function renderLosses(){
@@ -289,30 +335,16 @@ function renderLosses(){
   if(!LOSSES || !LOSSES.games || LOSSES.games.length===0){
     box.innerHTML = '<div class="empty">暂无评估败局数据 (下次 eval 后出现) 🎉</div>'; return;
   }
-  let html = `<div class="loss-meta">第 ${LOSSES.epoch} 轮评估 · 胜率 ${fmtPct(LOSSES.eval_win)} · 败局共 ${LOSSES.n_losses_total} 局 (展示前 ${LOSSES.games.length} 局)</div>`;
-  LOSSES.games.forEach((g, gi) => {
-    html += `<div class="game">`;
-    html += `<div class="game-head">败局 #${gi+1} · 共 ${g.n_moves} 手 · 农民 P${g.winner} 先跑 🏃💨</div>`;
-    html += `<div class="hands">`;
-    html += `<div class="hand lord"><b>👑 地主P0 [${cnt(g.init[0])}]</b>${chips(g.init[0])}</div>`;
-    html += `<div class="hand farm"><b>🧑‍🌾 农民P1 [${cnt(g.init[1])}]</b>${chips(g.init[1])}</div>`;
-    html += `<div class="hand farm"><b>🧑‍🌾 农民P2 [${cnt(g.init[2])}]</b>${chips(g.init[2])}</div>`;
-    html += `<div class="hand deck"><b>🂠 底牌</b>${chips(g.end)}</div>`;
-    html += `</div><div class="moves">`;
-    g.moves.forEach((m, i) => {
-      html += `<div class="move p${m.player}"><div class="move-top">`;
-      html += `<span class="mv-no">${i+1}</span><span class="mv-who">P${m.player}</span>`;
-      html += `<span class="mv-play">出 ${chips(m.play)}</span></div>`;
-      html += `<div class="mv-remain">`;
-      const tag = ['👑P0','🧑‍🌾P1','🧑‍🌾P2'];
-      for(let s=0;s<3;s++){
-        html += `<div class="rem ${s===m.player?'active':''}"><span class="cnt">${tag[s]} ${cnt(m.remain[s])}张</span> ${chips(m.remain[s])}</div>`;
-      }
-      html += `</div></div>`;
-    });
-    html += `</div></div>`;
-  });
-  box.innerHTML = html;
+  const n = LOSSES.games.length;
+  lossPage = clampLossPage(lossPage);
+  const pager = `<div class="lpager">
+    <button onclick="lossGo(-1)">◀ 上一局</button>
+    <span>第 <input id="lpInput" type="number" min="1" max="${n}" value="${lossPage+1}"
+       onchange="lossJump()" onkeydown="if(event.key==='Enter'){lossJump();}"> / ${n} 局</span>
+    <button onclick="lossGo(1)">下一局 ▶</button>
+    <span class="lmeta">第 ${LOSSES.epoch} 轮评估 · 胜率 ${fmtPct(LOSSES.eval_win)} · 实际败局 ${LOSSES.n_losses_total} 局 (存 ${n} 局)</span>
+  </div>`;
+  box.innerHTML = pager + gameCardHTML(LOSSES.games[lossPage], lossPage);
 }
 
 function renderTable(){
