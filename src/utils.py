@@ -425,33 +425,40 @@ def find_legal_cards(my_cards: List[int], history:List[List[int]]) -> List[List[
         prev_type = cal_cards_type(pad_history[-2])
         return find_bigger_cards(prev_type, my_cards) + [tuple()]
 
-# ---------------- PBRS 势函数 / 牌力与倍率 (支柱1、2) ----------------
-# 势函数权重 (可调超参)。量级控制在 |Φ| ~ 0.5 以内, 不盖过终局奖励。
+# ---------------- PBRS 势函数 / 牌力与倍率 (支柱1、2; P1) ----------------
+# 势函数权重 (可调超参)。控制牌(大小王/2)逐张重权, 使"多花控制牌"在当步即有代价。
 PHI_W = {
-    'progress': 0.20,   # 出牌进度: 牌越少势越高
-    'bomb':     0.15,   # 炸弹 (留存火力, 资产)
-    'rocket':   0.20,   # 火箭 (资产)
-    'high':     0.05,   # 2 / 王 控场单张
+    'progress': 0.12,   # 普通牌出牌进度: 普通牌越少势越高
+    'ctrl':     0.10,   # 每张控制牌(大王/小王/2)的留存价值 (P1 核心: 重权)
+    'bomb':     0.15,   # 每个炸弹 (留存火力)
+    'rocket':   0.10,   # 完整火箭额外加成 (在两张王的 ctrl 之外)
     'frag':     0.02,   # 压不住场的碎散低单张, 扣分
 }
 
 
 def hand_potential(cards, weights=None):
-    """对一手牌估一个势 Φ(H), 用于 PBRS 塑形。空手(已出完)返回 0。
-    牌值约定: 13=2, 14=小王, 15=大王。"""
+    """对一手牌估一个势 Φ(H), 用于 PBRS 塑形 (支柱2 / P1)。空手(已出完)返回 0。
+    牌值约定: 13=2, 14=小王, 15=大王。
+
+    设计要点 (针对"浪费控制牌 / 拆火箭"类失误): 把能压单牌的控制牌(大王/小王/2)
+    逐张重权, 出牌进度只统计普通牌。于是"出整副王炸"会比"只出一张小王"在当步
+    多掉一张控制牌的势 -> 塑形奖励明确偏好"用最小代价夺回出牌权", 同样抑制把 2
+    当垫子、把炸弹拆散等浪费控制资源的打法。
+    """
     if not cards:
         return 0.0
     w = weights or PHI_W
     cnt = Counter(cards)
     n = len(cards)
+    ctrl = cnt.get(13, 0) + cnt.get(14, 0) + cnt.get(15, 0)     # 2 + 小王 + 大王 张数
+    n_normal = n - ctrl                                         # 普通牌数
     bombs = sum(1 for v, c in cnt.items() if c == 4)
     rocket = 1 if (14 in cnt and 15 in cnt) else 0
-    highs = cnt.get(13, 0) + cnt.get(14, 0) + cnt.get(15, 0)   # 2 + 小王 + 大王
-    frag = sum(1 for v, c in cnt.items() if c == 1 and v < 13)  # 低位孤张
-    return (w['progress'] * (1.0 - n / 20.0)
+    frag = sum(1 for v, c in cnt.items() if c == 1 and 1 <= v <= 8)  # 3..10 的孤张
+    return (w['progress'] * (1.0 - n_normal / 20.0)
+            + w['ctrl'] * ctrl
             + w['bomb'] * bombs
             + w['rocket'] * rocket
-            + w['high'] * highs
             - w['frag'] * frag)
 
 

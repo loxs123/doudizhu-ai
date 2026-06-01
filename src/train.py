@@ -57,7 +57,10 @@ def parse_args():
     parser.add_argument("--use_pbrs", type=int, default=1, help="1=启用势函数塑形")
     # 支柱3: Boltzmann 探索 (温度随 epoch 线性退火)
     parser.add_argument("--temperature", type=float, default=1.0, help="起始采样温度")
-    parser.add_argument("--temperature_min", type=float, default=0.1, help="退火终点温度")
+    parser.add_argument("--temperature_min", type=float, default=0.25,
+                        help="退火终点温度 (P4: 抬高以在后期保持探索)")
+    parser.add_argument("--temperature_anneal_frac", type=float, default=0.7,
+                        help="P4: 温度在前 frac*epochs 内线性退到下限, 之后保持下限")
     # 支柱4: n 步自举 (0=纯蒙特卡洛)
     parser.add_argument("--n_step", type=int, default=0, help="0=MC; >0=用目标网络做n步自举")
     # 自博弈相关
@@ -138,9 +141,10 @@ if __name__ == "__main__":
 
     for epoch in range(args['epochs']):
         t0 = time.time()
-        # 温度线性退火: temp_start -> temperature_min
-        frac = epoch / max(1, args['epochs'] - 1)
-        args['temperature'] = temp_start * (1 - frac) + args['temperature_min'] * frac
+        # P4: 温度在前 anneal_frac*epochs 内线性退到下限, 之后保持下限(后期仍探索)
+        anneal_frac = max(1e-6, args.get('temperature_anneal_frac', 0.7))
+        prog = min(1.0, epoch / max(1, anneal_frac * (args['epochs'] - 1)))
+        args['temperature'] = temp_start * (1 - prog) + args['temperature_min'] * prog
         logging.info('─' * 20 + f'  epoch {epoch}/{args["epochs"]}  (τ={args["temperature"]:.3f})  ' + '─' * 20)
 
         agent_states = [deepcopy(agent.q_model.state_dict())
