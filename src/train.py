@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import time
 import multiprocessing as mp
@@ -86,8 +87,16 @@ def parse_args():
     parser.add_argument("--epsilon_low", type=float, default=0.2)
     parser.add_argument("--epsilon_high", type=float, default=0.2)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr_min", type=float, default=-1.0,
+                        help="lr 余弦衰减终点; <0 表示恒定 lr(不衰减)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=8)
+    # 模型结构 (模型参数角度; 默认与原结构一致)
+    parser.add_argument("--d_model", type=int, default=512)
+    parser.add_argument("--nhead", type=int, default=8)
+    parser.add_argument("--d_ff", type=int, default=2048)
+    parser.add_argument("--n_layers", type=int, default=3)
+    parser.add_argument("--mlp_head", type=int, default=0, help="1=价值头用两层MLP")
     # 支柱1: ADP 倍率奖励 + 回报标准化
     parser.add_argument("--reward_multiplier", type=int, default=1,
                         help="1=终局奖励按炸弹/火箭/春天翻倍(ADP), 0=纯胜负(WP)")
@@ -199,6 +208,14 @@ if __name__ == "__main__":
         anneal_frac = max(1e-6, args.get('temperature_anneal_frac', 0.7))
         prog = min(1.0, epoch / max(1, anneal_frac * (args['epochs'] - 1)))
         args['temperature'] = temp_start * (1 - prog) + args['temperature_min'] * prog
+        # lr 余弦衰减(模型参数角度): lr -> lr_min; lr_min<0 则恒定
+        if args.get('lr_min', -1) >= 0:
+            lr_t = args['lr_min'] + 0.5 * (args['lr'] - args['lr_min']) * \
+                   (1 + math.cos(math.pi * epoch / max(1, args['epochs'] - 1)))
+            for ag in agents:
+                if hasattr(ag, 'optimizer'):
+                    for grp in ag.optimizer.param_groups:
+                        grp['lr'] = lr_t
         logging.info('─' * 20 + f'  epoch {epoch}/{args["epochs"]}  (τ={args["temperature"]:.3f})  ' + '─' * 20)
 
         agent_states = [deepcopy(agent.q_model.state_dict())

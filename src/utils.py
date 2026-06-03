@@ -483,6 +483,93 @@ def count_multiplier(actions, winner, cap=4):
     return mult
 
 
+# ---------------- 结构化动作特征 (特征设计角度) ----------------
+# 在每个"动作 token"上附加: 出牌牌型 + 主牌大小 + 当前必须压的牌(牌型+大小)
+# + 是否消耗控制牌(2/王) / 出牌后火力 / 是否拆炸弹。直击"用最小代价夺权、别浪费大牌"。
+ACTION_EXTRA_DIM = 16 + 1 + 16 + 1 + 5  # =39: 出牌型16 + 出牌rank1 + 压制型16 + 压制rank1 + 私有5
+
+
+def current_to_beat(history):
+    """当前这一手必须压过的牌型(领出则为 Kong); 与 find_legal_cards 判定一致, 只看最近两手。"""
+    pad = [(), ()] + list(history)
+    if not pad[-1] and not pad[-2]:
+        return {'type': Card.Kong, 'value': None}
+    elif pad[-1]:
+        return cal_cards_type(list(pad[-1]))
+    else:
+        return cal_cards_type(list(pad[-2]))
+
+
+def action_extra(play, hand_before, to_beat_type):
+    """一手出牌的结构化特征向量(长度 ACTION_EXTRA_DIM)。
+    play: 这手出的牌; hand_before: 出牌前的手牌; to_beat_type: 需压过的牌型 dict。"""
+    v = np.zeros(ACTION_EXTRA_DIM, dtype=np.float32)
+    pt = cal_cards_type(list(play))
+    v[pt['type'].value - 1] = 1.0                                   # [0:16] 出牌牌型 one-hot
+    v[16] = (pt['value'][0] / 15.0) if pt.get('value') else 0.0     # [16]   出牌主牌大小
+    v[17 + to_beat_type['type'].value - 1] = 1.0                    # [17:33] 必须压的牌型 one-hot
+    v[33] = (to_beat_type['value'][0] / 15.0) if to_beat_type.get('value') else 0.0  # [33] 压制牌大小
+
+    cnt_play = Counter(play)
+    after = Counter(hand_before)
+    for c in play:
+        after[c] -= 1
+    control_in_play = cnt_play.get(13, 0) + cnt_play.get(14, 0) + cnt_play.get(15, 0)
+    bombs_after = sum(1 for k, c in after.items() if c >= 4)
+    rocket_after = 1.0 if after.get(14, 0) >= 1 and after.get(15, 0) >= 1 else 0.0
+    control_after = sum(after.get(k, 0) for k in (13, 14, 15))
+    breaks_bomb = 0.0
+    for k, c in Counter(hand_before).items():
+        if c == 4 and 0 < cnt_play.get(k, 0) < 4:   # 用了某炸弹的部分牌却没整副打出 -> 拆炸弹
+            breaks_bomb = 1.0
+            break
+    v[34] = control_in_play / 4.0     # 这手消耗的控制牌(2/王)数
+    v[35] = bombs_after / 2.0         # 出牌后剩余炸弹数
+    v[36] = rocket_after              # 出牌后是否仍握完整火箭
+    v[37] = control_after / 6.0       # 出牌后剩余控制牌数
+    v[38] = breaks_bomb               # 是否拆了炸弹
+    return v
+
+
+# ---------------- 局面状态特征 (对手分开 / 控制资源 / 角色, 从斗地主视角补全) ----------------
+STATE_EXTRA_DIM = 15 + 15 + 3 + 2 + 3 + 3 + 3  # =44
+
+
+def _rc(cards):
+    """15 维按点数计数 (3..大王 -> 牌值 1..15)。"""
+    v = np.zeros(15, dtype=np.float32)
+    for c in cards:
+        v[c - 1] += 1.0
+    return v
+
+
+def state_extra(hand_after, unseen, next_played, prev_played,
+                cnt_self, cnt_next, cnt_prev, playid):
+    """出牌方视角的局面特征(只填在出牌方/候选 token 上, 共 STATE_EXTRA_DIM 维)。
+    hand_after: 出牌后自己手牌; unseen: 两对手合计未现牌;
+    next_played/prev_played: 下家/上家已出过的牌; cnt_*: 各家剩余张数; playid: 座位。"""
+    v = np.zeros(STATE_EXTRA_DIM, dtype=np.float32)
+    o = 0
+    v[o:o + 15] = _rc(next_played); o += 15      # 下家已出的牌
+    v[o:o + 15] = _rc(prev_played); o += 15      # 上家已出的牌
+    v[o] = cnt_self / 20.0
+    v[o + 1] = cnt_next / 20.0
+    v[o + 2] = cnt_prev / 20.0; o += 3            # 三家剩余张数
+    v[o] = 1.0 if cnt_next <= 2 else 0.0
+    v[o + 1] = 1.0 if cnt_prev <= 2 else 0.0; o += 2   # 对手快走完危险旗
+    role = 0 if playid == 0 else (1 if playid == 1 else 2)
+    v[o + role] = 1.0; o += 3                      # 角色: 地主/下家农民/上家农民
+    hc = Counter(hand_after)
+    v[o] = hc.get(13, 0) / 4.0
+    v[o + 1] = (hc.get(14, 0) + hc.get(15, 0)) / 2.0
+    v[o + 2] = sum(1 for k, c in hc.items() if c == 4) / 2.0; o += 3   # 自己控制资源: 2/王/炸
+    uc = Counter(unseen)
+    v[o] = uc.get(13, 0) / 4.0
+    v[o + 1] = (uc.get(14, 0) + uc.get(15, 0)) / 2.0
+    v[o + 2] = sum(1 for k, c in uc.items() if c == 4) / 2.0; o += 3   # 未现控制资源(在对手处)
+    return v
+
+
 def card2vec(cards, pos=None):
     if pos is None:
         mem = np.zeros(54, dtype=np.int32)

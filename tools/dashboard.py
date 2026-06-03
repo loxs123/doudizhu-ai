@@ -193,7 +193,7 @@ function seatSeries(key){
   return seatIds().map(id => ({
     label: SEAT_NAME[id]||('seat'+id), color: SEAT_COLORS[id%3],
     points: DATA.filter(d => (d.seats||[]).some(x => x.id===id))
-      .map(d => ({x:d.epoch, y:(d.seats.find(x=>x.id===id)||{})[key]}))
+      .map(d => ({x:d.epoch+1, y:(d.seats.find(x=>x.id===id)||{})[key]}))
       .filter(p => p.y!=null && !isNaN(p.y))
   }));
 }
@@ -268,7 +268,7 @@ function render(){
     const lastEval = [...DATA].reverse().find(d => d.eval_win!=null);
     const best = [...DATA].reverse().find(d => d.best_eval!=null);
     const cards = [
-      ['gold','📅 当前 epoch', last.epoch + ' <small>/ '+DATA.length+' 条</small>'],
+      ['gold','📅 当前 epoch', (last.epoch+1) + ' <small>/ '+DATA.length+' 条</small>'],
       ['blue','🤖 地主胜率 (rollout)', fmtPct(last.rollout_win)],
       ['green','🎯 地主胜率 (vs 随机)', lastEval ? fmtPct(lastEval.eval_win) : '—'],
       ['pink','🏆 历史最佳', best ? fmtPct(best.best_eval) : '—'],
@@ -279,14 +279,14 @@ function render(){
   }
 
   drawChart('winrate', [
-    {label:'rollout', color:'#4f9cff', points: DATA.filter(d=>d.rollout_win!=null).map(d=>({x:d.epoch,y:d.rollout_win}))},
-    {label:'eval', color:'#4cc38a', points: DATA.filter(d=>d.eval_win!=null).map(d=>({x:d.epoch,y:d.eval_win}))},
-    {label:'best', color:'#b388ff', points: DATA.filter(d=>d.best_eval!=null).map(d=>({x:d.epoch,y:d.best_eval}))},
+    {label:'rollout', color:'#4f9cff', points: DATA.filter(d=>d.rollout_win!=null).map(d=>({x:d.epoch+1,y:d.rollout_win}))},
+    {label:'eval', color:'#4cc38a', points: DATA.filter(d=>d.eval_win!=null).map(d=>({x:d.epoch+1,y:d.eval_win}))},
+    {label:'best', color:'#b388ff', points: DATA.filter(d=>d.best_eval!=null).map(d=>({x:d.epoch+1,y:d.best_eval}))},
   ], {ymin:0, ymax:1});
   const loss = seatSeries('q_loss'); legend('lg_loss', loss); drawChart('loss', loss, {ymin:0});
   const ev = seatSeries('explained_var'); legend('lg_ev', ev); drawChart('ev', ev, {ymax:1});
   drawChart('entropy', [{label:'策略熵', color:'#b388ff',
-    points: DATA.filter(d=>d.policy_entropy!=null).map(d=>({x:d.epoch,y:d.policy_entropy}))}], {ymin:0, ymax:1});
+    points: DATA.filter(d=>d.policy_entropy!=null).map(d=>({x:d.epoch+1,y:d.policy_entropy}))}], {ymin:0, ymax:1});
 
   // 仅当败局数据变化时才重绘该区(否则 poll 会打断翻页/数字输入)
   const sig = LOSSES ? (LOSSES.epoch + '/' + (LOSSES.games ? LOSSES.games.length : 0)) : 'none';
@@ -361,6 +361,7 @@ function renderTable(){
   head += '</tr>';
   const fmtCell = (k,v) => {
     if(v==null) return '—';
+    if(k==='epoch') return v+1;
     if(k==='rollout_win'||k==='eval_win'||k==='best_eval') return (v*100).toFixed(1)+'%';
     if(typeof v==='number') return Number.isInteger(v)? v : v.toFixed(3);
     return v;

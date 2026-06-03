@@ -8,11 +8,13 @@ import numpy as np
 import math
 import copy
 
-from utils import find_all_legal_cards, cal_cards_type, find_legal_cards, card2vec
+from utils import (find_all_legal_cards, cal_cards_type, find_legal_cards, card2vec,
+                   action_extra, current_to_beat, ACTION_EXTRA_DIM,
+                   state_extra, STATE_EXTRA_DIM)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ALL_CARDS = [i//4 + 1 if i <= 51 else i // 4 + 1 + i - 52 for i in range(54)]
-EMBED_SIZE = 59 + 21 + 54 + 54
+EMBED_SIZE = 59 + 21 + 54 + 54 + ACTION_EXTRA_DIM + STATE_EXTRA_DIM
 
 def explained_variance(y_true, y_pred, mask=None):
     """解释方差; 传入 mask 时只在有效决策位上统计。"""
@@ -180,15 +182,21 @@ class TransformerDecoderLayer(nn.Module):
 
 
 class QNetwork(nn.Module):
-    """对每个序列位置输出一个标量 Q 值 (该位置对应"已出动作"的状态-动作价值)。"""
-    def __init__(self):
+    """对每个序列位置输出一个标量 Q 值 (该位置对应"已出动作"的状态-动作价值)。
+    结构可配置(模型参数角度): d_model / nhead / d_ff / n_layers / mlp_head。"""
+    def __init__(self, d_model=512, nhead=8, d_ff=2048, n_layers=3, mlp_head=False):
         super().__init__()
-        self.input_layer = nn.Linear(EMBED_SIZE, 512)  # 输入是54张牌的one-hot编码/1(不出情况)/3+1(底牌)位置标记
+        self.input_layer = nn.Linear(EMBED_SIZE, d_model)
+        self.input_norm = nn.LayerNorm(d_model)        # 输入侧规整, 稳训练
         self.layers = nn.ModuleList(
-            [TransformerDecoderLayer(d_model=512, nhead=8, dim_feedforward=2048)
-            for _ in range(3)]
+            [TransformerDecoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=d_ff)
+            for _ in range(n_layers)]
         )
-        self.decoder_layer = nn.Linear(512, 1) # 输出 Q 值
+        if mlp_head:
+            self.decoder_layer = nn.Sequential(
+                nn.Linear(d_model, d_model // 2), nn.ReLU(), nn.Linear(d_model // 2, 1))
+        else:
+            self.decoder_layer = nn.Linear(d_model, 1)  # 输出 Q 值
 
     def forward(self, x, past_key_values=None, use_cache=False):
         """
@@ -206,7 +214,7 @@ class QNetwork(nn.Module):
         # 构造 full mask，再裁剪出最后一块
         mask = torch.tril(torch.ones((total_len, total_len), device=x.device)).bool()
         tgt_mask = mask[total_len - seq_len:total_len, :total_len]
-        x = self.input_layer(x)
+        x = self.input_norm(self.input_layer(x))
 
         new_past_key_values = []
 
@@ -230,10 +238,18 @@ class Agent:
         self.playid = playid
         self.past_key_values = None
         self.prev_len = 0
+        # 模型结构配置 (模型参数角度); 默认与原结构一致
+        self._mcfg = dict(
+            d_model=int(kwargs.get('d_model', 512)),
+            nhead=int(kwargs.get('nhead', 8)),
+            d_ff=int(kwargs.get('d_ff', 2048)),
+            n_layers=int(kwargs.get('n_layers', 3)),
+            mlp_head=bool(kwargs.get('mlp_head', 0)),
+        )
         if q_model is not None:
             self.q_model = q_model
         else:
-            self.q_model = QNetwork().to(DEVICE)
+            self.q_model = QNetwork(**self._mcfg).to(DEVICE)
 
         self.sample_eps = kwargs.get('sample_eps', 0.03)
         self.temperature = kwargs.get('temperature', 1.0)        # 支柱3: Boltzmann 温度
@@ -248,7 +264,7 @@ class Agent:
             lr = kwargs.get('lr', 1e-4)
             self.optimizer = torch.optim.Adam(self.q_model.parameters(), lr=lr)
             # 支柱4: 目标网络 (用于 n 步自举, 周期同步)
-            self.target_model = QNetwork().to(DEVICE)
+            self.target_model = QNetwork(**self._mcfg).to(DEVICE)
             self.target_model.load_state_dict(self.q_model.state_dict())
             self.target_model.eval()
 
@@ -268,6 +284,11 @@ class Agent:
                 other_cards.remove(card)
             left_cnt[i % 3] -= len(cards)
 
+        to_beat = current_to_beat(history)   # 当前必须压过的牌型(领出则 Kong)
+        nxt, prv = (self.playid + 1) % 3, (self.playid + 2) % 3
+        next_played = [c for j, pl in enumerate(history) if j % 3 == nxt for c in pl]
+        prev_played = [c for j, pl in enumerate(history) if j % 3 == prv for c in pl]
+        _AE = 188 + ACTION_EXTRA_DIM
         for i, act in enumerate(legal_actions):
             cur_cards = copy.deepcopy(hand_cards)
             for card in act: cur_cards.remove(card)
@@ -277,6 +298,9 @@ class Agent:
             act_vecs[i, 59:80] = cnt_vec
             act_vecs[i, 80:134] = card2vec(cur_cards)
             act_vecs[i, 134:188] = card2vec(other_cards)
+            act_vecs[i, 188:_AE] = action_extra(act, hand_cards, to_beat)   # 结构化动作特征
+            act_vecs[i, _AE:] = state_extra(cur_cards, other_cards, next_played, prev_played,
+                                            len(cur_cards), left_cnt[nxt], left_cnt[prv], self.playid)
 
         act_vecs = torch.tensor(act_vecs, dtype=torch.float32).to(DEVICE)
 
